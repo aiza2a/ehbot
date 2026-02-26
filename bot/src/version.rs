@@ -11,6 +11,6 @@ pub(crate) static VERSION: &str = concat!(
     "\n",
     "Cargo目标平台：   \t",
     env!("VERGEN_CARGO_TARGET_TRIPLE"),
-    "\n"，
+    "\n",
     "源碼:    \thttps://github.com/qini7-sese/eh2telegraph"
 );
