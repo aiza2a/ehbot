@@ -143,79 +143,91 @@ where
         }
     }
 
-    // ==== 新增：全能正則與參數解析器 ====
+    // =========================================================================
+    // 核心修改 1：全能正则与参数解析器
+    // =========================================================================
     fn parse_url_and_ranges(raw_url: &str, text: &str) -> (String, Option<usize>, Option<usize>) {
+        let mut clean_url = raw_url.to_string();
         let mut start_page = None;
         let mut end_page = None;
-        let mut final_url = raw_url.to_string();
 
-        // 1. 嘗試從文本中的 URL 後方尋找空格參數 (如: url 3 6 或 url 3)
+        // 步骤 1：安全提取 URL 尾部的斜杠页码 (解决 https://nhentai.net/g/598758/3 的提取)
+        if let Ok(mut parsed_url) = Url::parse(raw_url) {
+            let mut segments: Vec<String> = parsed_url.path_segments()
+                .map(|s| s.filter(|x| !x.is_empty()).map(|x| x.to_string()).collect())
+                .unwrap_or_default();
+            
+            let host = parsed_url.host_str().unwrap_or_default();
+            let mut is_page_segment = false;
+            
+            // 精准防呆：防止将 N 站的纯画廊 ID (如 /g/123/) 误判为页码并删除
+            if host.contains("nhentai") && segments.len() == 3 && segments[0] == "g" {
+                is_page_segment = true;
+            } else if host.contains("hentai.org") && segments.len() == 4 && segments[0] == "g" {
+                is_page_segment = true;
+            }
+
+            if is_page_segment {
+                if let Some(page_str) = segments.last() {
+                    if let Ok(page) = page_str.parse::<usize>() {
+                        start_page = Some(page);
+                        segments.pop(); // 弹出被识别为页码的段落
+                        let new_path = segments.join("/") + "/";
+                        parsed_url.set_path(&new_path);
+                        clean_url = parsed_url.to_string();
+                    }
+                }
+            }
+        }
+
+        // 步骤 2：提取跟在 URL 之后的空格数字参数 (兼容如 "url/3 16" 的混合格式)
         if let Some(idx) = text.find(raw_url) {
             let after_url = &text[idx + raw_url.len()..];
             let parts: Vec<&str> = after_url.split_whitespace().collect();
-            if !parts.is_empty() {
-                if parts.len() == 1 {
-                    if let Ok(p) = parts[0].parse::<usize>() {
-                        start_page = Some(p);
-                        end_page = Some(p);
-                    }
-                } else if parts.len() >= 2 {
-                    if let (Ok(s), Ok(e)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
-                        start_page = Some(s);
-                        end_page = Some(e);
-                    } else if let Ok(p) = parts[0].parse::<usize>() {
-                        start_page = Some(p);
-                        end_page = Some(p);
-                    }
+            
+            let mut numbers = Vec::new();
+            for part in parts {
+                if let Ok(n) = part.parse::<usize>() {
+                    numbers.push(n);
                 }
+            }
+
+            if numbers.len() >= 2 {
+                // 有两个数字，完全覆盖起止
+                start_page = Some(numbers[0]);
+                end_page = Some(numbers[1]);
+            } else if numbers.len() == 1 {
+                if let Some(s) = start_page {
+                    // 已有斜杠页码，新的数字作为终止页码 (e.g., url/3 16)
+                    end_page = Some(numbers[0]);
+                } else {
+                    // 单个空格数字作为唯一页码 (e.g., url 3)
+                    start_page = Some(numbers[0]);
+                    end_page = Some(numbers[0]);
+                }
+            } else {
+                if start_page.is_some() {
+                    end_page = start_page; // 仅有斜杠
+                }
+            }
+        } else {
+            if start_page.is_some() {
+                end_page = start_page;
             }
         }
 
-        // 2. 如果沒找到空格參數，嘗試從 URL 末尾判斷是否是隱式頁碼 (如: url/3)
-        if start_page.is_none() {
-            if let Ok(mut parsed_url) = Url::parse(&final_url) {
-                let segments: Vec<String> = parsed_url.path_segments()
-                    .map(|s| s.map(|x| x.to_string()).collect())
-                    .unwrap_or_default();
-                    
-                if let Some(last_seg) = segments.last() {
-                    // 相容帶結尾斜槓與不帶斜槓的情況
-                    let seg_to_parse = if last_seg.is_empty() && segments.len() > 1 {
-                        &segments[segments.len() - 2]
-                    } else {
-                        last_seg
-                    };
-
-                    if let Ok(page) = seg_to_parse.parse::<usize>() {
-                        // 防止誤將 N 站的 6 位車牌號當作頁碼
-                        if page < 10000 {
-                            start_page = Some(page);
-                            end_page = Some(page);
-                            
-                            // 彈出被當作 Path 的頁碼，並恢復安全的結尾斜槓
-                            if last_seg.is_empty() {
-                                parsed_url.path_segments_mut().unwrap().pop().pop();
-                            } else {
-                                parsed_url.path_segments_mut().unwrap().pop();
-                            }
-                            parsed_url.path_segments_mut().unwrap().push("");
-                            final_url = parsed_url.to_string();
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. 防呆校正：保證 start 永遠小於等於 end
+        // 步骤 3：防呆校正，保证 start 永远 <= end
         if let (Some(s), Some(e)) = (start_page, end_page) {
             let (real_s, real_e) = if s > e { (e, s) } else { (s, e) };
-            return (final_url, Some(real_s), Some(real_e));
+            return (clean_url, Some(real_s), Some(real_e));
         }
 
-        (final_url, start_page, end_page)
+        (clean_url, start_page, end_page)
     }
 
-    // ==== 新增：統一的同步觸發器（解決入口分散導致的硬編碼 BUG） ====
+    // =========================================================================
+    // 核心修改 2：统一入口路由分发
+    // =========================================================================
     async fn trigger_sync(
         &'static self,
         bot: DefaultParseMode<Bot>,
@@ -225,7 +237,7 @@ where
         extracted_url: &str,
         full_text: &str,
     ) {
-        // 利用全能解析器統一過濾出參數
+        // 利用全能解析器完美得出纯净的 URL 和正确的范围
         let (url, start_page, end_page) = Self::parse_url_and_ranges(extracted_url, full_text);
         
         let prompt_msg: Message = match bot.send_message(chat_id, escape(&format!("Syncing url {url}"))).reply_to_message_id(reply_msg_id).await {
@@ -237,13 +249,14 @@ where
         let url_clone = url.clone();
         let cancel_rx = self.register_sync(user_id, &url);
 
+        // 计算相差页数 (Difference)
         let diff = match (start_page, end_page) {
             (Some(s), Some(e)) => e.saturating_sub(s),
             _ => usize::MAX, 
         };
 
         if diff <= 5 {
-            // 觸發相冊直發 (Media Group)
+            // 当 起始页面跟终止页面 相差 <= 5 页时，触发相册直发 (最大6图)
             let s = start_page.unwrap();
             let e = end_page.unwrap();
             tokio::spawn(async move {
@@ -251,7 +264,7 @@ where
                 self.unregister_sync(user_id, &url_clone);
             });
         } else {
-            // 觸發 Telegraph 生成
+            // 当相差 > 5页，或者未传页码全量下载时，走 Telegraph 机制（自动触发 Create & Edit 黑科技）
             tokio::spawn(async move {
                 let result = self.sync_range_response(&url_clone, start_page, end_page, cancel_rx).await;
                 self.unregister_sync(user_id, &url_clone);
@@ -260,6 +273,9 @@ where
         }
     }
 
+    // =========================================================================
+    // 触发生命周期 (监听命令 / 文本 / 媒体)
+    // =========================================================================
     pub async fn respond_cmd(
         &'static self,
         bot: DefaultParseMode<Bot>,
@@ -289,7 +305,6 @@ where
                 let raw_url = parts.first().unwrap_or(&"").to_string();
                 info!("[cmd handler] receive sync request from {:?} for {raw_url}", PrettyChat(&msg.chat));
                 
-                // 調用統一觸發器
                 self.trigger_sync(bot, msg.chat.id, msg.chat.id.0, msg.id, &raw_url, &input).await;
             }
         };
@@ -318,7 +333,6 @@ where
 
         if let Some(url) = maybe_link {
             let full_text = msg.text().unwrap_or("");
-            // 統一路由，徹底解決直發不生效 BUG
             self.trigger_sync(bot, msg.chat.id, msg.chat.id.0, msg.id, &url, full_text).await;
             return ControlFlow::Break(());
         }
@@ -404,8 +418,9 @@ where
         ControlFlow::Break(())
     }
 
-    // ==== 底層邏輯接口 ====
-
+    // =========================================================================
+    // 底层路由执行逻辑
+    // =========================================================================
     async fn sync_range_response(&self, url: &str, start: Option<usize>, end: Option<usize>, mut cancel_rx: oneshot::Receiver<()>) -> String {
         tokio::select! {
             result = self.single_flight.work(url, || async {
