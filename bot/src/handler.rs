@@ -289,14 +289,14 @@ where
             Command::Start | Command::Help =>{ 
                 let intro = r#"嗨！這裡是 *薄青✨*
 
-                本機器人采用白名單模式，支持畫廊全量與片段同步。
-                您可以直接發送鏈接，或使用指令：
-                ► 格式：`/sync <url> <start> <end>`
-                    ▻ 示例 1：`/sync <url> 3` \(單頁直發\)
-                    ▻ 示例 2：`/sync <url> 3 16` \(抓取 3\-16 頁，少於 5 頁時以圖片組發送\)
+本機器人采用白名單模式，支持畫廊全量與片段同步。
+您可以直接發送鏈接，或使用指令：
+► 格式：`/sync <url> <start> <end>`
+    ▻ 示例 1：`/sync <url> 3` \(單頁直發\)
+    ▻ 示例 2：`/sync <url> 3 16` \(抓取 3\-16 頁，少於 5 頁時以圖片組發送\)
 
-                *可用指令列表：*
-                "#;
+*可用指令列表：*
+"#;
                 let cmds = escape(&Command::descriptions().to_string());
                 let text = format!("{}{}", intro, cmds);
 
@@ -524,30 +524,6 @@ where
     ) {
         let url_clone = url.to_string();
         
-        tokio::select! {
-            result = self.route_fetch_images(&url_clone, start, end) => {
-                match result {
-                    Ok((meta, images)) if !images.is_empty() => {
-                        let mut media_group = Vec::new();
-                        
-                        let title_text = if start == end {
-                            format!("{} ┆ ᴘᴀɢᴇ: {}", meta.name, start)
-                        } else {
-                            format!("{} ┆ ᴘᴀɢᴇꜱ: {}-{}", meta.name, start, end)
-                        };
-
-                        let display_title = escape(&title_text);
-                        let caption = format!("*{}*", link(&meta.link, &display_title));
-
-                        for (i, (_img_meta, data)) in images.into_iter().enumerate() {
-                            let mut photo = InputMediaPhoto::new(InputFile::memory(data.as_ref().to_owned()));
-                            if i == 0 {
-                                photo = photo.caption(caption.clone()).parse_mode(ParseMode::MarkdownV2);
-                            }
-                            media_group.push(InputMedia::Photo(photo));
-                        }
-
-
         tokio::select! {
             result = self.route_fetch_images(&url_clone, start, end) => {
                 match result {
