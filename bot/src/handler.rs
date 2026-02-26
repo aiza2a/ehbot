@@ -420,24 +420,11 @@ where
     // 底层路由执行逻辑
     // =========================================================================
     async fn sync_range_response(&self, url: &str, start: Option<usize>, end: Option<usize>, mut cancel_rx: oneshot::Receiver<()>) -> String {
-        tokio::select! {
-            result = self.single_flight.work(url, || async {
-                match self.route_sync(url, start, end).await {
-                    Ok(sync_url) => format!("同步到 Telegraph 完成: {}", link(&sync_url, &escape(&sync_url))),
-                    Err(e) => format!("同步到 Telegraph 失敗: {}", escape(&e.to_string())),
-                }
-            }) => result,
-            _ = &mut cancel_rx => "同步操作被取消。".to_string()
-        }
-    }
-
-    async fn sync_range_response(&self, url: &str, start: Option<usize>, end: Option<usize>, mut cancel_rx: oneshot::Receiver<()>) -> String {
         let url_clone = url.to_string();
         
         tokio::select! {
             result = self.single_flight.work(url, || async {
                 let meta_opt = self.route_fetch_images(&url_clone, 1, 0).await.ok().map(|(m, _)| m);
-
                 match self.route_sync(&url_clone, start, end).await {
                     Ok(sync_url) => {
                         let host = Url::parse(&url_clone).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
@@ -445,15 +432,14 @@ where
                             "exhentai.org" => "ᴇxʜᴇɴᴛᴀɪ",
                             "e-hentai.org" => "ᴇ-ʜᴇɴᴛᴀɪ",
                             "nhentai.net" | "nhentai.to" => "ɴʜᴇɴᴛᴀɪ",
-                            _ => "ɴʜᴇɴᴛᴀɪ",
+                            _ => "ᴜɴᴋɴᴏᴡɴ",
                         };
 
                         if let Some(meta) = meta_opt {
                             let title_display = format!("{} ({})", meta.name, url_clone);
                             let title_link = link(&url_clone, &escape(&title_display));
                             let title_bold = format!("*{}*", title_link);
-
-                            let preview_display = format!("〔 即 時 預 覽 ({}) 〕", sync_url);
+                            let preview_display = format!("〔 即 時 預 覽  ({}) 〕", sync_url);
                             let preview_link = link(&sync_url, &escape(&preview_display));
                             let preview_bold = format!("*{}*", preview_link);
 
@@ -462,6 +448,7 @@ where
                                 title_bold, preview_bold, source_name
                             )
                         } else {
+                            // 降級顯示 (如果萬一沒抓取到 Meta)
                             let preview_display = format!("〔 即 時 預 覽  ({}) 〕", sync_url);
                             let preview_link = link(&sync_url, &escape(&preview_display));
                             let preview_bold = format!("*{}*", preview_link);
@@ -472,10 +459,10 @@ where
                             )
                         }
                     },
-                    Err(e) => format!("`同步到 Telegraph 失敗:` {}", escape(&e.to_string())),
+                    Err(e) => format!("同步到 Telegraph 失敗: `{}`", escape(&e.to_string())),
                 }
             }) => result,
-            _ = &mut cancel_rx => escape("同步操作被取消。")
+            _ = &mut cancel_rx => escape("同步操作被取消")
         }
     }
 
@@ -527,9 +514,9 @@ where
                         
                         // 1. 動態判斷是單頁還是多頁範圍
                         let title_text = if start == end {
-                            format!("{} (ᴘᴀɢᴇꜱ {})", meta.name, start)
+                            format!("{} (ᴘᴀɢᴇ:{})", meta.name, start)
                         } else {
-                            format!("{} (ᴘᴀɢᴇꜱ {}-{})", meta.name, start, end)
+                            format!("{} (ᴘᴀɢᴇꜱ:{}-{})", meta.name, start, end)
                         };
                         
                         // 2. 對標題進行轉義，避免 MarkdownV2 報錯
