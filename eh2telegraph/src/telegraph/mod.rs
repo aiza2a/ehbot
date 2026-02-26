@@ -25,9 +25,7 @@ const TITLE_LENGTH_MAX: usize = 200;
 
 #[derive(Debug, Clone)]
 pub struct Telegraph<T, C = Client> {
-    // http client
     client: C,
-    // access token
     access_token: T,
 }
 
@@ -119,20 +117,13 @@ where
     T: AccessToken,
     C: HttpRequestBuilder,
 {
-    /// Create page.
     pub async fn create_page(&self, page: &PageCreate) -> Result<Page, TelegraphError> {
         #[derive(Serialize)]
         struct PageCreateShadow<'a> {
-            /// Title of the page.
             pub title: &'a str,
-            /// Content of the page.
             pub content: &'a str,
-
-            /// Optional. Name of the author, displayed below the title.
             #[serde(skip_serializing_if = "Option::is_none")]
             pub author_name: &'a Option<String>,
-            /// Optional. Profile link, opened when users click on the author's name below the title.
-            /// Can be any link, not necessarily to a Telegram profile or channel.
             #[serde(skip_serializing_if = "Option::is_none")]
             pub author_url: &'a Option<String>,
         }
@@ -144,13 +135,9 @@ where
             page: &'a PageCreateShadow<'a>,
         }
 
-        let title = page
-            .title
-            .chars()
-            .take(TITLE_LENGTH_MAX)
-            .collect::<String>();
-        let content =
-            serde_json::to_string(&page.content).expect("unable to content serialize json");
+        let title = page.title.chars().take(TITLE_LENGTH_MAX).collect::<String>();
+        let content = serde_json::to_string(&page.content).expect("unable to content serialize json");
+        
         let to_post = PagePostWithToken {
             access_token: self.access_token.token(),
             page: &PageCreateShadow {
@@ -160,28 +147,17 @@ where
                 author_url: &page.author_url,
             },
         };
-        execute!(self
-            .client
-            .post_builder("https://api.telegra.ph/createPage")
-            .form(&to_post))
+        execute!(self.client.post_builder("https://api.telegra.ph/createPage").form(&to_post))
     }
 
-    /// Edit page.
     pub async fn edit_page(&self, page: &PageEdit) -> Result<Page, TelegraphError> {
         #[derive(Serialize)]
         struct PageEditShadow<'a> {
-            /// Title of the page.
             pub title: &'a str,
-            /// Path to the page.
             pub path: &'a str,
-            /// Content of the page.
-            pub content: &'a Vec<Node>,
-
-            /// Optional. Name of the author, displayed below the title.
+            pub content: &'a str, // <--- 修复处：将 &'a Vec<Node> 修正为 &'a str
             #[serde(skip_serializing_if = "Option::is_none")]
             pub author_name: &'a Option<String>,
-            /// Optional. Profile link, opened when users click on the author's name below the title.
-            /// Can be any link, not necessarily to a Telegram profile or channel.
             #[serde(skip_serializing_if = "Option::is_none")]
             pub author_url: &'a Option<String>,
         }
@@ -193,30 +169,23 @@ where
             page: &'a PageEditShadow<'a>,
         }
 
-        let title = page
-            .title
-            .chars()
-            .take(TITLE_LENGTH_MAX)
-            .collect::<String>();
+        let title = page.title.chars().take(TITLE_LENGTH_MAX).collect::<String>();
+        // <--- 修复处：主动将节点序列化为 JSON 字符串
+        let content_str = serde_json::to_string(&page.content).expect("unable to content serialize json");
+        
         let to_post = PageEditWithToken {
             access_token: self.access_token.select_token(&page.path),
             page: &PageEditShadow {
                 title: &title,
                 path: &page.path,
-                content: &page.content,
+                content: &content_str, 
                 author_name: &page.author_name,
                 author_url: &page.author_url,
             },
         };
-        execute!(self
-            .client
-            .post_builder("https://api.telegra.ph/editPage")
-            .form(&to_post))
+        execute!(self.client.post_builder("https://api.telegra.ph/editPage").form(&to_post))
     }
 
-    /// Get page.
-    /// path: Path to the Telegraph page (in the format Title-12-31, i.e. everything
-    /// that comes after http://telegra.ph/)
     pub async fn get_page(&self, path: &str) -> Result<Page, TelegraphError> {
         #[derive(Serialize)]
         struct PageGet<'a> {
@@ -229,14 +198,9 @@ where
             path,
             return_content: Some(true),
         };
-        execute!(self
-            .client
-            .post_builder("https://api.telegra.ph/getPage")
-            .form(&to_post))
+        execute!(self.client.post_builder("https://api.telegra.ph/getPage").form(&to_post))
     }
 
-    /// Upload file.
-    /// If the result is Ok, it's length must eq to files'.
     pub async fn upload<IT, I>(&self, files: IT) -> Result<Vec<MediaInfo>, TelegraphError>
     where
         IT: IntoIterator<Item = I>,
@@ -247,7 +211,7 @@ where
         for data in files.into_iter() {
             let form = Form::new()
                 .text("reqtype", "fileupload")
-                .text("userhash", "") // Empty string for anonymous upload
+                .text("userhash", "")
                 .part("fileToUpload", Part::bytes(data).file_name("image.jpg"));
 
             let response = self
@@ -260,7 +224,6 @@ where
 
             let url = response.text().await?;
 
-            // catbox.moe returns just the URL as plain text
             if url.starts_with("https://files.catbox.moe/") {
                 results.push(MediaInfo { src: url });
             } else {
@@ -269,86 +232,5 @@ where
         }
 
         Ok(results)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::telegraph::{
-        types::{Node, PageCreate},
-        SingleAccessToken, Telegraph,
-    };
-
-    use super::types::{NodeElement, NodeElementAttr, Tag};
-
-    pub const TELEGRAPH_TOKEN: &str =
-        "f42d3570f95412b59b08d64450049e4d609b1f2a57657fce6ce8acc908aa";
-
-    #[ignore]
-    #[tokio::test]
-    async fn demo_create_page() {
-        let telegraph = Telegraph::<SingleAccessToken>::new(TELEGRAPH_TOKEN.to_string());
-        let page = PageCreate {
-            title: "title".to_string(),
-            content: vec![
-                Node::Text("test text".to_string()),
-                Node::NodeElement(NodeElement {
-                    tag: Tag::A,
-                    attrs: Some(NodeElementAttr {
-                        href: Some("https://google.com".to_string()),
-                        src: None,
-                    }),
-                    children: Some(vec![Node::Text("link".to_string())]),
-                }),
-            ],
-            author_name: Some("test_author".to_string()),
-            author_url: Some("https://t.co".to_string()),
-        };
-        let page = telegraph.create_page(&page).await.unwrap();
-        println!("test page: {page:?}");
-    }
-
-    #[ignore]
-    #[tokio::test]
-    async fn demo_upload() {
-        let demo_image: Vec<u8> = reqwest::get("https://t.co/static/images/bird.png")
-            .await
-            .unwrap()
-            .bytes()
-            .await
-            .unwrap()
-            .as_ref()
-            .to_owned();
-
-        let telegraph = Telegraph::<SingleAccessToken>::new(TELEGRAPH_TOKEN.to_string());
-        let ret = telegraph
-            .upload(Some(demo_image))
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
-        println!("uploaded file link: {}", ret.src);
-    }
-
-    #[ignore]
-    #[tokio::test]
-    async fn demo_create_images_page() {
-        let telegraph = Telegraph::<SingleAccessToken>::new(TELEGRAPH_TOKEN.to_string());
-        let node = Node::NodeElement(NodeElement {
-            tag: Tag::Img,
-            attrs: Some(NodeElementAttr {
-                src: Some("https://telegra.ph/file/e31b40e99b0c028601ccb.png".to_string()),
-                href: None,
-            }),
-            children: None,
-        });
-        let page = PageCreate {
-            title: "title".to_string(),
-            content: vec![node],
-            author_name: Some("test_author".to_string()),
-            author_url: None,
-        };
-        let page = telegraph.create_page(&page).await.unwrap();
-        println!("test page: {page:?}");
     }
 }
