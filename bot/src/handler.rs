@@ -36,8 +36,9 @@ const MIN_SIMILARITY_PRIVATE: u8 = 50;
 #[command(
     rename_rule = "lowercase",
     description = "\
-    ✨ 嗨！這裡是 薄青，您已在白名單中！\n\n\
-    🚀 本機器人支持畫廊全量與片段同步。您可以直接發送鏈接，或使用指令：\n\
+    ✨ 嗨！這裡是 薄青~\n\n\
+    🚀 本機器人採用白名單模式，支持畫廊全量與片段同步\n\
+       您可以直接發送鏈接，或使用指令：\n\
     👉 格式：/sync <url> <start> <end>\n\
         💡 示例 1：/sync <url> 3 (單頁直發)\n\
         💡 示例 2：/sync <url> 3 16 (抓取 3-16 頁，少於5頁時以圖片組發送)\n\n\
@@ -514,9 +515,9 @@ where
                         
                         // 1. 動態判斷是單頁還是多頁範圍
                         let title_text = if start == end {
-                            format!("{} (ᴘᴀɢᴇ:{})", meta.name, start)
+                            format!("{}┆(ᴘᴀɢᴇ: {})", meta.name, start)
                         } else {
-                            format!("{} (ᴘᴀɢᴇꜱ:{}-{})", meta.name, start, end)
+                            format!("{}┆(ᴘᴀɢᴇꜱ: {}-{})", meta.name, start, end)
                         };
                         
                         // 2. 對標題進行轉義，避免 MarkdownV2 報錯
