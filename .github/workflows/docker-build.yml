@@ -41,5 +41,5 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ghcr.io/aiza2a/ehbot:latest
+            ghcr.io/aiza2a/ehbot:v0.1
             ghcr.io/aiza2a/ehbot:${{ env.VERSIONED_TAG }}
