@@ -143,6 +143,123 @@ where
         }
     }
 
+    // ==== 新增：全能正則與參數解析器 ====
+    fn parse_url_and_ranges(raw_url: &str, text: &str) -> (String, Option<usize>, Option<usize>) {
+        let mut start_page = None;
+        let mut end_page = None;
+        let mut final_url = raw_url.to_string();
+
+        // 1. 嘗試從文本中的 URL 後方尋找空格參數 (如: url 3 6 或 url 3)
+        if let Some(idx) = text.find(raw_url) {
+            let after_url = &text[idx + raw_url.len()..];
+            let parts: Vec<&str> = after_url.split_whitespace().collect();
+            if !parts.is_empty() {
+                if parts.len() == 1 {
+                    if let Ok(p) = parts[0].parse::<usize>() {
+                        start_page = Some(p);
+                        end_page = Some(p);
+                    }
+                } else if parts.len() >= 2 {
+                    if let (Ok(s), Ok(e)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
+                        start_page = Some(s);
+                        end_page = Some(e);
+                    } else if let Ok(p) = parts[0].parse::<usize>() {
+                        start_page = Some(p);
+                        end_page = Some(p);
+                    }
+                }
+            }
+        }
+
+        // 2. 如果沒找到空格參數，嘗試從 URL 末尾判斷是否是隱式頁碼 (如: url/3)
+        if start_page.is_none() {
+            if let Ok(mut parsed_url) = Url::parse(&final_url) {
+                let segments: Vec<String> = parsed_url.path_segments()
+                    .map(|s| s.map(|x| x.to_string()).collect())
+                    .unwrap_or_default();
+                    
+                if let Some(last_seg) = segments.last() {
+                    // 相容帶結尾斜槓與不帶斜槓的情況
+                    let seg_to_parse = if last_seg.is_empty() && segments.len() > 1 {
+                        &segments[segments.len() - 2]
+                    } else {
+                        last_seg
+                    };
+
+                    if let Ok(page) = seg_to_parse.parse::<usize>() {
+                        // 防止誤將 N 站的 6 位車牌號當作頁碼
+                        if page < 10000 {
+                            start_page = Some(page);
+                            end_page = Some(page);
+                            
+                            // 彈出被當作 Path 的頁碼，並恢復安全的結尾斜槓
+                            if last_seg.is_empty() {
+                                parsed_url.path_segments_mut().unwrap().pop().pop();
+                            } else {
+                                parsed_url.path_segments_mut().unwrap().pop();
+                            }
+                            parsed_url.path_segments_mut().unwrap().push("");
+                            final_url = parsed_url.to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. 防呆校正：保證 start 永遠小於等於 end
+        if let (Some(s), Some(e)) = (start_page, end_page) {
+            let (real_s, real_e) = if s > e { (e, s) } else { (s, e) };
+            return (final_url, Some(real_s), Some(real_e));
+        }
+
+        (final_url, start_page, end_page)
+    }
+
+    // ==== 新增：統一的同步觸發器（解決入口分散導致的硬編碼 BUG） ====
+    async fn trigger_sync(
+        &'static self,
+        bot: DefaultParseMode<Bot>,
+        chat_id: ChatId,
+        user_id: i64,
+        reply_msg_id: MessageId,
+        extracted_url: &str,
+        full_text: &str,
+    ) {
+        // 利用全能解析器統一過濾出參數
+        let (url, start_page, end_page) = Self::parse_url_and_ranges(extracted_url, full_text);
+        
+        let prompt_msg: Message = match bot.send_message(chat_id, escape(&format!("Syncing url {url}"))).reply_to_message_id(reply_msg_id).await {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        
+        let prompt_msg_id = prompt_msg.id;
+        let url_clone = url.clone();
+        let cancel_rx = self.register_sync(user_id, &url);
+
+        let diff = match (start_page, end_page) {
+            (Some(s), Some(e)) => e.saturating_sub(s),
+            _ => usize::MAX, 
+        };
+
+        if diff <= 5 {
+            // 觸發相冊直發 (Media Group)
+            let s = start_page.unwrap();
+            let e = end_page.unwrap();
+            tokio::spawn(async move {
+                self.send_media_group_response(&bot, chat_id, prompt_msg_id, reply_msg_id, &url_clone, s, e, cancel_rx).await;
+                self.unregister_sync(user_id, &url_clone);
+            });
+        } else {
+            // 觸發 Telegraph 生成
+            tokio::spawn(async move {
+                let result = self.sync_range_response(&url_clone, start_page, end_page, cancel_rx).await;
+                self.unregister_sync(user_id, &url_clone);
+                let _ = bot.edit_message_text(chat_id, prompt_msg_id, result).await;
+            });
+        }
+    }
+
     pub async fn respond_cmd(
         &'static self,
         bot: DefaultParseMode<Bot>,
@@ -169,66 +286,11 @@ where
                 }
 
                 let parts: Vec<&str> = input.split_whitespace().collect();
-                let mut raw_url = parts.first().unwrap_or(&"").to_string();
-                let mut start_page: Option<usize> = None;
-                let mut end_page: Option<usize> = None;
-
-                if let Ok(mut parsed_url) = Url::parse(&raw_url) {
-                    if let Some(last_seg) = parsed_url.path_segments().and_then(|s| s.last()) {
-                        if let Ok(page) = last_seg.parse::<usize>() {
-                            start_page = Some(page);
-                            end_page = Some(page);
-                            parsed_url.path_segments_mut().unwrap().pop();
-                            raw_url = parsed_url.to_string();
-                        }
-                    }
-                }
-
-                if parts.len() == 2 {
-                    if let Ok(p) = parts[1].parse::<usize>() {
-                        start_page = Some(p);
-                        end_page = Some(p);
-                    }
-                } else if parts.len() >= 3 {
-                    start_page = parts[1].parse::<usize>().ok();
-                    end_page = parts[2].parse::<usize>().ok();
-                }
-
-                if let (Some(s), Some(e)) = (start_page, end_page) {
-                    if s > e {
-                        start_page = Some(e);
-                        end_page = Some(s);
-                    }
-                }
-
+                let raw_url = parts.first().unwrap_or(&"").to_string();
                 info!("[cmd handler] receive sync request from {:?} for {raw_url}", PrettyChat(&msg.chat));
                 
-                let original_msg_id = msg.id;
-                let prompt_msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {raw_url}"))).reply_to_message_id(original_msg_id).await);
-                let prompt_msg_id = prompt_msg.id;
-
-                let url_clone = raw_url.clone();
-                let cancel_rx = self.register_sync(msg.chat.id.0, &raw_url);
-
-                let diff = match (start_page, end_page) {
-                    (Some(s), Some(e)) => e - s,
-                    _ => usize::MAX, 
-                };
-
-                if diff <= 5 {
-                    let s = start_page.unwrap();
-                    let e = end_page.unwrap();
-                    tokio::spawn(async move {
-                        self.send_media_group_response(&bot, msg.chat.id, prompt_msg_id, &url_clone, s, e, cancel_rx).await;
-                        self.unregister_sync(msg.chat.id.0, &url_clone);
-                    });
-                } else {
-                    tokio::spawn(async move {
-                        let result = self.sync_range_response(&url_clone, start_page, end_page, cancel_rx).await;
-                        self.unregister_sync(msg.chat.id.0, &url_clone);
-                        let _ = bot.edit_message_text(msg.chat.id, prompt_msg_id, result).await;
-                    });
-                }
+                // 調用統一觸發器
+                self.trigger_sync(bot, msg.chat.id, msg.chat.id.0, msg.id, &raw_url, &input).await;
             }
         };
         ControlFlow::Break(())
@@ -255,16 +317,9 @@ where
         };
 
         if let Some(url) = maybe_link {
-            let original_msg_id = msg.id;
-            let prompt_msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(original_msg_id).await);
-            
-            let url_clone = url.clone();
-            let cancel_rx = self.register_sync(msg.chat.id.0, &url);
-            tokio::spawn(async move {
-                let result = self.sync_range_response(&url, None, None, cancel_rx).await;
-                self.unregister_sync(msg.chat.id.0, &url_clone);
-                let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, result).await;
-            });
+            let full_text = msg.text().unwrap_or("");
+            // 統一路由，徹底解決直發不生效 BUG
+            self.trigger_sync(bot, msg.chat.id, msg.chat.id.0, msg.id, &url, full_text).await;
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
@@ -295,16 +350,8 @@ where
         }
 
         if let Some(url) = final_url {
-            let original_msg_id = msg.id;
-            let prompt_msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(original_msg_id).await);
-            
-            let url_clone = url.clone();
-            let cancel_rx = self.register_sync(msg.chat.id.0, &url);
-            tokio::spawn(async move {
-                let result = self.sync_range_response(&url, None, None, cancel_rx).await;
-                self.unregister_sync(msg.chat.id.0, &url_clone);
-                let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, result).await;
-            });
+            let full_text = msg.caption().unwrap_or("");
+            self.trigger_sync(bot, msg.chat.id, msg.chat.id.0, msg.id, &url, full_text).await;
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
@@ -343,16 +390,8 @@ where
         }
 
         if let Some((url, _)) = url_sim {
-            let original_msg_id = msg.id;
-            if let Ok(prompt_msg) = bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(original_msg_id).await {
-                let url_clone = url.clone();
-                let cancel_rx = self.register_sync(msg.chat.id.0, &url);
-                tokio::spawn(async move {
-                    let result = self.sync_range_response(&url, None, None, cancel_rx).await;
-                    self.unregister_sync(msg.chat.id.0, &url_clone);
-                    let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, result).await;
-                });
-            }
+            let full_text = msg.caption().unwrap_or("");
+            self.trigger_sync(bot, msg.chat.id, msg.chat.id.0, msg.id, &url, full_text).await;
             return ControlFlow::Break(());
         }
         ControlFlow::Continue(())
@@ -365,7 +404,7 @@ where
         ControlFlow::Break(())
     }
 
-    // ==== 核心路由與發送方法 ====
+    // ==== 底層邏輯接口 ====
 
     async fn sync_range_response(&self, url: &str, start: Option<usize>, end: Option<usize>, mut cancel_rx: oneshot::Receiver<()>) -> String {
         tokio::select! {
@@ -409,7 +448,8 @@ where
         &self,
         bot: &DefaultParseMode<Bot>,
         chat_id: ChatId,
-        msg_id: MessageId,
+        prompt_msg_id: MessageId,
+        reply_msg_id: MessageId,
         url: &str,
         start: usize,
         end: usize,
@@ -418,7 +458,6 @@ where
         let url_clone = url.to_string();
         
         tokio::select! {
-            // 这里去掉了原本报错的 self.single_flight.work，直接 await 获取结果
             result = self.route_fetch_images(&url_clone, start, end) => {
                 match result {
                     Ok((meta, images)) if !images.is_empty() => {
@@ -427,25 +466,25 @@ where
                         let caption = link(&meta.link, &display_title);
 
                         for (i, (_img_meta, data)) in images.into_iter().enumerate() {
-                            let mut photo = InputMediaPhoto::new(InputFile::memory(data));
+                            let mut photo = InputMediaPhoto::new(InputFile::memory(data.as_ref().to_owned()));
                             if i == 0 {
                                 photo = photo.caption(caption.clone()).parse_mode(ParseMode::MarkdownV2);
                             }
                             media_group.push(InputMedia::Photo(photo));
                         }
 
-                        if let Ok(_) = bot.send_media_group(chat_id, media_group).reply_to_message_id(msg_id).await {
-                            let _ = bot.delete_message(chat_id, msg_id).await;
+                        if let Ok(_) = bot.send_media_group(chat_id, media_group).reply_to_message_id(reply_msg_id).await {
+                            let _ = bot.delete_message(chat_id, prompt_msg_id).await;
                         } else {
-                            let _ = bot.edit_message_text(chat_id, msg_id, escape("Failed to send media group.")).await;
+                            let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Failed to send media group.")).await;
                         }
                     },
-                    Ok(_) => { let _ = bot.edit_message_text(chat_id, msg_id, escape("Failed: No images found in this range.")).await; },
-                    Err(e) => { let _ = bot.edit_message_text(chat_id, msg_id, escape(&format!("Fetch failed: {}", e))).await; }
+                    Ok(_) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Failed: No images found in this range.")).await; },
+                    Err(e) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape(&format!("Fetch failed: {}", e))).await; }
                 }
             },
             _ = &mut cancel_rx => {
-                 let _ = bot.edit_message_text(chat_id, msg_id, escape("Operation cancelled by user.")).await;
+                 let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Operation cancelled by user.")).await;
             }
         }
     }
