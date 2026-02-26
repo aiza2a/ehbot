@@ -429,7 +429,6 @@ where
         for element in search_result.data.into_iter().filter(|x| x.similarity >= threshold) {
             match element.parsed {
                 SaucenaoParsed::EHentai(f_hash) => {
-                    // EHentai 的 hash 解析可能過期，因此加入安全判定
                     if let Ok(converted_url) = self.convertor.convert_to_gallery(&f_hash).await {
                         url_sim = Some((converted_url, element.similarity));
                         break;
@@ -450,6 +449,7 @@ where
         } else {
             let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape(&format!("找不到匹配的畫廊，或相似度低於閾值 ({}%)", threshold))).await;
         }
+        
         ControlFlow::Break(())
     }
 
