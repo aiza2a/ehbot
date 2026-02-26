@@ -74,11 +74,12 @@ impl Title {
         if let Some(pretty) = &self.pretty {
             return pretty.clone();
         }
-        if let Some(english) = &self.english {
-            return english.clone();
-        }
+
         if let Some(japanese) = &self.japanese {
             return japanese.clone();
+        }
+        if let Some(english) = &self.english {
+            return english.clone();
         }
         f()
     }
