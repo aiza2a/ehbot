@@ -1,7 +1,7 @@
 version: "3"
 services:
   ehbot:
-    image: ghcr.io/bglzdgrlcg/ehbot:latest
+    image: ghcr.io/aizawa/ehbot:latest
     container_name: ehbot
     restart: always
     network_mode: "host"
