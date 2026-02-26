@@ -71,12 +71,11 @@ struct Title {
 
 impl Title {
     fn title(&self, f: impl Fn() -> String) -> String {
-        if let Some(pretty) = &self.pretty {
-            return pretty.clone();
-        }
-
         if let Some(japanese) = &self.japanese {
             return japanese.clone();
+        }    
+        if let Some(pretty) = &self.pretty {
+            return pretty.clone();
         }
         if let Some(english) = &self.english {
             return english.clone();
