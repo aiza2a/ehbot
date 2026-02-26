@@ -39,10 +39,10 @@ pub enum Command {
     Id,
     #[command(description = "開始使用機器人")]
     Start,
-    #[command(description = "同步指定的畫廊")]
-    Sync(String),
     #[command(description = "顯示此幫助信息")]
     Help,
+    #[command(description = "同步指定的畫廊")]
+    Sync(String),
     #[command(description = "顯示機器人版本")]
     Version,
     #[command(description = "取消所有正在進行的同步操作")]
@@ -390,15 +390,38 @@ where
             self.send_unauthorized(&bot, &msg).await;
             return ControlFlow::Break(());
         }
-        let first_photo = match msg.photo().and_then(|x| x.first()) {
+        
+        let best_photo = match msg.photo().and_then(|x| x.last()) {
             Some(p) => p,
             None => return ControlFlow::Continue(()),
         };
 
-        let f = ok_or_break!(bot.get_file(&first_photo.file.id).await);
+        let prompt_msg = match bot.send_message(msg.chat.id, escape("正在透過 SauceNAO 檢索來源...")).reply_to_message_id(msg.id).await {
+            Ok(m) => m,
+            Err(_) => return ControlFlow::Break(()),
+        };
+
+        let f = match bot.get_file(&best_photo.file.id).await {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape("無法獲取 Telegram 圖片檔案。")).await;
+                return ControlFlow::Break(());
+            }
+        };
+
         let mut buf: Vec<u8> = Vec::with_capacity(f.size as usize);
-        ok_or_break!(teloxide::net::Download::download_file(&bot, &f.path, &mut buf).await);
-        let search_result: SaucenaoOutput = ok_or_break!(self.searcher.search(buf).await);
+        if teloxide::net::Download::download_file(&bot, &f.path, &mut buf).await.is_err() {
+            let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape("圖片下載失敗。")).await;
+            return ControlFlow::Break(());
+        }
+
+        let search_result = match self.searcher.search(buf).await {
+            Ok(res) => res,
+            Err(e) => {
+                let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape(&format!("SauceNAO 檢索失敗: {}", e))).await;
+                return ControlFlow::Break(());
+            }
+        };
 
         let mut url_sim = None;
         let threshold = if msg.chat.is_private() { MIN_SIMILARITY_PRIVATE } else { MIN_SIMILARITY };
@@ -406,8 +429,11 @@ where
         for element in search_result.data.into_iter().filter(|x| x.similarity >= threshold) {
             match element.parsed {
                 SaucenaoParsed::EHentai(f_hash) => {
-                    url_sim = Some((ok_or_break!(self.convertor.convert_to_gallery(&f_hash).await), element.similarity));
-                    break;
+                    // EHentai 的 hash 解析可能過期，因此加入安全判定
+                    if let Ok(converted_url) = self.convertor.convert_to_gallery(&f_hash).await {
+                        url_sim = Some((converted_url, element.similarity));
+                        break;
+                    }
                 }
                 SaucenaoParsed::NHentai(nid) => {
                     url_sim = Some((format!("https://nhentai.net/g/{nid}/"), element.similarity));
@@ -416,13 +442,15 @@ where
                 _ => continue,
             }
         }
-
-        if let Some((url, _)) = url_sim {
+        if let Some((url, _sim)) = url_sim {
+            let _ = bot.delete_message(msg.chat.id, prompt_msg.id).await;
+            
             let full_text = msg.caption().unwrap_or("");
             self.trigger_sync(bot, msg.chat.id, msg.chat.id.0, msg.id, &url, full_text).await;
-            return ControlFlow::Break(());
+        } else {
+            let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape(&format!("找不到匹配的畫廊，或相似度低於閾值 ({}%)", threshold))).await;
         }
-        ControlFlow::Continue(())
+        ControlFlow::Break(())
     }
 
     pub async fn respond_default(&'static self, bot: DefaultParseMode<Bot>, msg: Message) -> ControlFlow<()> {
