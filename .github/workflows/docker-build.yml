@@ -32,7 +32,7 @@ jobs:
         with:
           registry: ghcr.io
           username: aiza2a
-          password: ${{ secrets.GITHU_TOKEN }}
+          password: ${{ secrets.CR_PAT }}
       - name: Generate App Version
         run: echo VERSIONED_TAG=`git describe --tags --always` >> $GITHUB_ENV
       - name: Build docker image
