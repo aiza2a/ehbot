@@ -36,21 +36,23 @@ const MIN_SIMILARITY_PRIVATE: u8 = 50;
 #[command(
     rename_rule = "lowercase",
     description = "\
-    This is a gallery synchronization robot that is convenient for users to view pictures directly in Telegram.\n\
-    Bot supports sync with command, text url, or image(private chat search thrashold is lower).\n\
-    [New] Support range sync: /sync <url> <start> <end> (e.g., /sync url 3 16 or url/3)\n\n\
-    These commands are supported:"
+    ✨ 嗨！這裡是 薄青，您已在白名單中！\n\n\
+    🚀 本機器人支持畫廊全量與片段同步。您可以直接發送鏈接，或使用指令：\n\
+    👉 格式：/sync <url> <start> <end>\n\
+        💡 示例 1：/sync <url> 3 (單頁直發)\n\
+        💡 示例 2：/sync <url> 3 16 (抓取 3-16 頁，＜5頁時圖片組發送)\n\n\ 
+    👇 可用指令列表："
 )]
 pub enum Command {
-    #[command(description = "Display this help. 顯示這條幫助信息")]
-    Help,
-    #[command(description = "Show bot verison. 顯示機器人版本")]
-    Version,
-    #[command(description = "Show your account id. 顯示你的帳號 ID")]
+    #[command(description = "顯示帳號ID")]
     Id,
-    #[command(description = "Sync a gallery. 同步一個畫廊(目前支持 EH/EX/NH)")]
+    #[command(description = "同步一個畫廊")]
     Sync(String),
-    #[command(description = "Cancel all ongoing sync operations. 取消所有正在進行的同步操作。")]
+    #[command(description = "顯示此幫助信息")]
+    Help,
+    #[command(description = "顯示機器人版本")]
+    Version,
+    #[command(description = "取消所有正在進行的同步操作。")]
     Cancel,
 }
 
@@ -139,7 +141,7 @@ where
 
     async fn send_unauthorized(&self, bot: &DefaultParseMode<Bot>, msg: &Message) {
         if msg.chat.is_private() {
-            let _ = bot.send_message(msg.chat.id, escape("User not authorized!")).reply_to_message_id(msg.id).await;
+            let _ = bot.send_message(msg.chat.id, escape("用户未授权！")).reply_to_message_id(msg.id).await;
         }
     }
 
@@ -220,6 +222,7 @@ where
         (clean_url, start_page, end_page)
     }
 
+
     async fn trigger_sync(
         &'static self,
         bot: DefaultParseMode<Bot>,
@@ -231,7 +234,16 @@ where
     ) {
         let (url, start_page, end_page) = Self::parse_url_and_ranges(extracted_url, full_text);
         
-        let prompt_msg: Message = match bot.send_message(chat_id, escape(&format!("Syncing url {url}"))).reply_to_message_id(reply_msg_id).await {
+        // 根據解析出的頁碼，動態構建要顯示的提示字串
+        let display_target = match (start_page, end_page) {
+            (Some(s), Some(e)) if s != e => format!("{} {} {}", url, s, e), // 有範圍 (如: url 2 10)
+            (Some(s), _) => format!("{} {}", url, s),                       // 只有單頁 (如: url 3)
+            _ => url.clone(),                                               // 全量下載 (如: url)
+        };
+        
+        let prompt_text = format!("正在同步 < {} > 中！", display_target);
+        
+        let prompt_msg: Message = match bot.send_message(chat_id, escape(&prompt_text)).reply_to_message_id(reply_msg_id).await {
             Ok(m) => m,
             Err(_) => return,
         };
@@ -245,6 +257,7 @@ where
             _ => usize::MAX, 
         };
 
+        
         if diff <= 5 {
             let s = start_page.unwrap();
             let e = end_page.unwrap();
@@ -270,10 +283,10 @@ where
         match command {
             Command::Help => { let _ = bot.send_message(msg.chat.id, escape(&Command::descriptions().to_string())).reply_to_message_id(msg.id).await; }
             Command::Version => { let _ = bot.send_message(msg.chat.id, escape(crate::version::VERSION)).reply_to_message_id(msg.id).await; }
-            Command::Id => { let _ = bot.send_message(msg.chat.id, format!("Current chat id is {}", code_inline(&msg.chat.id.to_string()))).reply_to_message_id(msg.id).await; }
+            Command::Id => { let _ = bot.send_message(msg.chat.id, format!("目前的 Chat ID 為·{}", code_inline(&msg.chat.id.to_string()))).reply_to_message_id(msg.id).await; }
             Command::Cancel => {
                 let count = self.cancel_all_syncs(msg.chat.id.0);
-                let text = if count > 0 { format!("Cancelled {} sync operations.", count) } else { "No active sync operations.".to_string() };
+                let text = if count > 0 { format!("已取消 {} 個同步操作。", count) } else { "沒有正在進行的同步操作！".to_string() };
                 let _ = bot.send_message(msg.chat.id, escape(&text)).reply_to_message_id(msg.id).await;
             }
             Command::Sync(input) => {
@@ -282,7 +295,7 @@ where
                     return ControlFlow::Break(());
                 }
                 if input.is_empty() {
-                    let _ = bot.send_message(msg.chat.id, escape("Usage: /sync url [start] [end]")).reply_to_message_id(msg.id).await;
+                    let _ = bot.send_message(msg.chat.id, escape("使用方法：/sync <url> [start] [end]")).reply_to_message_id(msg.id).await;
                     return ControlFlow::Break(());
                 }
 
@@ -300,7 +313,7 @@ where
         if let AdminCommand::Delete(key) = command {
             tokio::spawn(async move {
                 let _ = self.synchronizer.delete_cache(&key).await;
-                let _ = bot.send_message(msg.chat.id, escape(&format!("Key {key} deleted."))).reply_to_message_id(msg.id).await;
+                let _ = bot.send_message(msg.chat.id, escape(&format!("Key {key} 已刪除"))).reply_to_message_id(msg.id).await;
             });
         }
         ControlFlow::Break(())
@@ -398,7 +411,7 @@ where
 
     pub async fn respond_default(&'static self, bot: DefaultParseMode<Bot>, msg: Message) -> ControlFlow<()> {
         if msg.chat.is_private() {
-            ok_or_break!(bot.send_message(msg.chat.id, escape("Unrecognized message. Maybe /help ?")).reply_to_message_id(msg.id).await);
+            ok_or_break!(bot.send_message(msg.chat.id, escape("無法識別的消息，請使用 /help 查看幫助。")).reply_to_message_id(msg.id).await);
         }
         ControlFlow::Break(())
     }
@@ -410,16 +423,65 @@ where
         tokio::select! {
             result = self.single_flight.work(url, || async {
                 match self.route_sync(url, start, end).await {
-                    Ok(sync_url) => format!("Sync to telegraph finished: {}", link(&sync_url, &escape(&sync_url))),
-                    Err(e) => format!("Sync to telegraph failed: {}", escape(&e.to_string())),
+                    Ok(sync_url) => format!("同步到 Telegraph 完成: {}", link(&sync_url, &escape(&sync_url))),
+                    Err(e) => format!("同步到 Telegraph 失敗: {}", escape(&e.to_string())),
                 }
             }) => result,
-            _ = &mut cancel_rx => "Sync operation was cancelled.".to_string()
+            _ = &mut cancel_rx => "同步操作被取消。".to_string()
         }
     }
 
+    async fn sync_range_response(&self, url: &str, start: Option<usize>, end: Option<usize>, mut cancel_rx: oneshot::Receiver<()>) -> String {
+        let url_clone = url.to_string();
+        
+        tokio::select! {
+            result = self.single_flight.work(url, || async {
+                let meta_opt = self.route_fetch_images(&url_clone, 1, 0).await.ok().map(|(m, _)| m);
+
+                match self.route_sync(&url_clone, start, end).await {
+                    Ok(sync_url) => {
+                        let host = Url::parse(&url_clone).ok().and_then(|u| u.host_str().map(|s| s.to_string())).unwrap_or_default();
+                        let source_name = match host.as_str() {
+                            "exhentai.org" => "ᴇxʜᴇɴᴛᴀɪ",
+                            "e-hentai.org" => "ᴇ-ʜᴇɴᴛᴀɪ",
+                            "nhentai.net" | "nhentai.to" => "ɴʜᴇɴᴛᴀɪ",
+                            _ => "ɴʜᴇɴᴛᴀɪ",
+                        };
+
+                        if let Some(meta) = meta_opt {
+                            let title_display = format!("{} ({})", meta.name, url_clone);
+                            let title_link = link(&url_clone, &escape(&title_display));
+                            let title_bold = format!("*{}*", title_link);
+
+                            let preview_display = format!("〔 即 時 預 覽 ({}) 〕", sync_url);
+                            let preview_link = link(&sync_url, &escape(&preview_display));
+                            let preview_bold = format!("*{}*", preview_link);
+
+                            format!(
+                                "`❀Title :` {}\n\n`❀Preview :` {}\n\n► `{}`",
+                                title_bold, preview_bold, source_name
+                            )
+                        } else {
+                            let preview_display = format!("〔 即 時 預 覽  ({}) 〕", sync_url);
+                            let preview_link = link(&sync_url, &escape(&preview_display));
+                            let preview_bold = format!("*{}*", preview_link);
+
+                            format!(
+                                "`❀Preview :` {}\n\n► `{}`",
+                                preview_bold, source_name
+                            )
+                        }
+                    },
+                    Err(e) => format!("`同步到 Telegraph 失敗:` {}", escape(&e.to_string())),
+                }
+            }) => result,
+            _ = &mut cancel_rx => escape("同步操作被取消。")
+        }
+    }
+
+
     async fn route_sync(&self, url: &str, start: Option<usize>, end: Option<usize>) -> anyhow::Result<String> {
-        let u = Url::parse(url).map_err(|_| anyhow::anyhow!("Invalid url"))?;
+        let u = Url::parse(url).map_err(|_| anyhow::anyhow!("無效鏈接"))?;
         let host = u.host_str().unwrap_or_default();
         let path = u.path().to_string();
 
@@ -432,7 +494,7 @@ where
     }
 
     async fn route_fetch_images(&self, url: &str, start: usize, end: usize) -> anyhow::Result<(AlbumMeta, Vec<(ImageMeta, ImageData)>)> {
-        let u = Url::parse(url).map_err(|_| anyhow::anyhow!("Invalid url"))?;
+        let u = Url::parse(url).map_err(|_| anyhow::anyhow!("無效鏈接"))?;
         let host = u.host_str().unwrap_or_default();
         let path = u.path().to_string();
 
@@ -462,8 +524,17 @@ where
                 match result {
                     Ok((meta, images)) if !images.is_empty() => {
                         let mut media_group = Vec::new();
-                        let display_title = escape(&format!("{} (Pages {}-{})", meta.name, start, end));
-                        let caption = link(&meta.link, &display_title);
+                        
+                        // 1. 動態判斷是單頁還是多頁範圍
+                        let title_text = if start == end {
+                            format!("{} (ᴘᴀɢᴇꜱ {})", meta.name, start)
+                        } else {
+                            format!("{} (ᴘᴀɢᴇꜱ {}-{})", meta.name, start, end)
+                        };
+                        
+                        // 2. 對標題進行轉義，避免 MarkdownV2 報錯
+                        let display_title = escape(&title_text);
+                        let caption = format!("*{}*", link(&meta.link, &display_title));
 
                         for (i, (_img_meta, data)) in images.into_iter().enumerate() {
                             let mut photo = InputMediaPhoto::new(InputFile::memory(data.as_ref().to_owned()));
@@ -476,15 +547,15 @@ where
                         if let Ok(_) = bot.send_media_group(chat_id, media_group).reply_to_message_id(reply_msg_id).await {
                             let _ = bot.delete_message(chat_id, prompt_msg_id).await;
                         } else {
-                            let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Failed to send media group.")).await;
+                            let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("發送媒體組失敗。")).await;
                         }
                     },
-                    Ok(_) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Failed: No images found in this range.")).await; },
-                    Err(e) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape(&format!("Fetch failed: {}", e))).await; }
+                    Ok(_) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("失敗：此範圍內未找到圖片。")).await; },
+                    Err(e) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape(&format!("獲取圖片失敗: {}", e))).await; }
                 }
             },
             _ = &mut cancel_rx => {
-                 let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Operation cancelled by user.")).await;
+                 let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("操作被用戶取消。")).await;
             }
         }
     }
