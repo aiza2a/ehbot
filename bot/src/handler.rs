@@ -37,7 +37,9 @@ const MIN_SIMILARITY_PRIVATE: u8 = 50;
 pub enum Command {
     #[command(description = "顯示帳號ID")]
     Id,
-    #[command(description = "同步指定畫廊")]
+    #[command(description = "開始使用機器人")]
+    Start,
+    #[command(description = "同步指定的畫廊")]
     Sync(String),
     #[command(description = "顯示此幫助信息")]
     Help,
@@ -132,7 +134,7 @@ where
 
     async fn send_unauthorized(&self, bot: &DefaultParseMode<Bot>, msg: &Message) {
         if msg.chat.is_private() {
-            let _ = bot.send_message(msg.chat.id, escape("用户未授权！")).reply_to_message_id(msg.id).await;
+            let _ = bot.send_message(msg.chat.id, escape("用户未被授权！")).reply_to_message_id(msg.id).await;
         }
     }
 
@@ -271,12 +273,23 @@ where
         msg: Message,
         command: Command,
     ) -> ControlFlow<()> {
+
+        // 【核心修改】：全局權限攔截
+        // 除了 /id 之外，其他所有指令（包含 /start, /help, /sync 等）都需要白名單授權
+        // 保留 /id 權限是為了讓未授權的用戶能獲取自己的 ID 以便提交給管理員添加白名單
+        if !matches!(command, Command::Id) {
+            if !self.is_allowed(msg.chat.id.0) {
+                self.send_unauthorized(&bot, &msg).await;
+                return ControlFlow::Break(());
+            }
+        }
+
         match command {
             //Command::Help => { let _ = bot.send_message(msg.chat.id, escape(&Command::descriptions().to_string())).reply_to_message_id(msg.id).await; }
-            Command::Help => { 
+            Command::Start | Command::Help =>{ 
                 // 手動編寫並已嚴格轉義的 MarkdownV2 引言
-                let intro = "嗨\\! 這裡是 *薄青*\\~\n\n\
-                本機器人采用白名單模式，支持畫廊全量與片段同步\n\
+                let intro = "嗨\\！這裡是 *薄 青*\n\n\
+                本機器人采用白名單模式，支持畫廊全量與片段同步。\n\
                 您可以直接發送鏈接，或使用指令：\n\
                 ► 格式：`/sync <url> <start> <end>`\n\
                     ▻ 示例 1：`/sync <url> 3` \\(單頁直發\\)\n\
@@ -290,17 +303,13 @@ where
                 let _ = bot.send_message(msg.chat.id, text).reply_to_message_id(msg.id).await; 
             }
             Command::Version => { let _ = bot.send_message(msg.chat.id, escape(crate::version::VERSION)).reply_to_message_id(msg.id).await; }
-            Command::Id => { let _ = bot.send_message(msg.chat.id, format!("目前的 Chat ID 為·{}", code_inline(&msg.chat.id.to_string()))).reply_to_message_id(msg.id).await; }
+            Command::Id => { let _ = bot.send_message(msg.chat.id, format!("目前的 Chat ID 為 {}", code_inline(&msg.chat.id.to_string()))).reply_to_message_id(msg.id).await; }
             Command::Cancel => {
                 let count = self.cancel_all_syncs(msg.chat.id.0);
                 let text = if count > 0 { format!("已取消 {} 個同步操作。", count) } else { "沒有正在進行的同步操作！".to_string() };
                 let _ = bot.send_message(msg.chat.id, escape(&text)).reply_to_message_id(msg.id).await;
             }
             Command::Sync(input) => {
-                if !self.is_allowed(msg.chat.id.0) {
-                    self.send_unauthorized(&bot, &msg).await;
-                    return ControlFlow::Break(());
-                }
                 if input.is_empty() {
                     let _ = bot.send_message(msg.chat.id, escape("使用方法：/sync <url> [start] [end]")).reply_to_message_id(msg.id).await;
                     return ControlFlow::Break(());
