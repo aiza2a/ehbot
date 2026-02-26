@@ -409,18 +409,16 @@ where
         &self,
         bot: &DefaultParseMode<Bot>,
         chat_id: ChatId,
-        prompt_msg_id: MessageId,
-        reply_msg_id: MessageId,
+        msg_id: MessageId,
         url: &str,
         start: usize,
         end: usize,
         mut cancel_rx: oneshot::Receiver<()>,
     ) {
         let url_clone = url.to_string();
-        let flight_key = format!("{}|{}|{}", url, start, end);
-        // let flight_key = format!("{}|{}|{}", url, start, end); // 这行不需要了可以删掉或注释
         
         tokio::select! {
+            // 这里去掉了原本报错的 self.single_flight.work，直接 await 获取结果
             result = self.route_fetch_images(&url_clone, start, end) => {
                 match result {
                     Ok((meta, images)) if !images.is_empty() => {
@@ -429,29 +427,25 @@ where
                         let caption = link(&meta.link, &display_title);
 
                         for (i, (_img_meta, data)) in images.into_iter().enumerate() {
-                            // 加上 .as_ref().to_owned() 嚴格適配 InputFile::memory 的 trait bound
-                            let mut photo = InputMediaPhoto::new(InputFile::memory(data.as_ref().to_owned()));
+                            let mut photo = InputMediaPhoto::new(InputFile::memory(data));
                             if i == 0 {
                                 photo = photo.caption(caption.clone()).parse_mode(ParseMode::MarkdownV2);
                             }
                             media_group.push(InputMedia::Photo(photo));
                         }
 
-                        // 精準回覆用戶最初的指令
-                        if let Ok(_) = bot.send_media_group(chat_id, media_group).reply_to_message_id(reply_msg_id).await {
-                            // 靜默刪除 Syncing url... 提示
-                            let _ = bot.delete_message(chat_id, prompt_msg_id).await;
+                        if let Ok(_) = bot.send_media_group(chat_id, media_group).reply_to_message_id(msg_id).await {
+                            let _ = bot.delete_message(chat_id, msg_id).await;
                         } else {
-                            let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Failed to send media group.")).await;
+                            let _ = bot.edit_message_text(chat_id, msg_id, escape("Failed to send media group.")).await;
                         }
                     },
-                    Ok(_) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Failed: No images found in this range.")).await; },
-                    Err(e) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape(&format!("Fetch failed: {}", e))).await; }
+                    Ok(_) => { let _ = bot.edit_message_text(chat_id, msg_id, escape("Failed: No images found in this range.")).await; },
+                    Err(e) => { let _ = bot.edit_message_text(chat_id, msg_id, escape(&format!("Fetch failed: {}", e))).await; }
                 }
             },
             _ = &mut cancel_rx => {
-                 let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Operation cancelled by user.")).await;
+                 let _ = bot.edit_message_text(chat_id, msg_id, escape("Operation cancelled by user.")).await;
             }
         }
     }
-}
