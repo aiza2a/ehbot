@@ -144,14 +144,13 @@ where
     }
 
     // =========================================================================
-    // 核心修改 1：全能正则与参数解析器
+    // 终极修复版：全能正则与参数解析器
     // =========================================================================
     fn parse_url_and_ranges(raw_url: &str, text: &str) -> (String, Option<usize>, Option<usize>) {
         let mut clean_url = raw_url.to_string();
         let mut start_page = None;
         let mut end_page = None;
 
-        // 步骤 1：安全提取 URL 尾部的斜杠页码 (解决 https://nhentai.net/g/598758/3 的提取)
         if let Ok(mut parsed_url) = Url::parse(raw_url) {
             let mut segments: Vec<String> = parsed_url.path_segments()
                 .map(|s| s.filter(|x| !x.is_empty()).map(|x| x.to_string()).collect())
@@ -160,7 +159,6 @@ where
             let host = parsed_url.host_str().unwrap_or_default();
             let mut is_page_segment = false;
             
-            // 精准防呆：防止将 N 站的纯画廊 ID (如 /g/123/) 误判为页码并删除
             if host.contains("nhentai") && segments.len() == 3 && segments[0] == "g" {
                 is_page_segment = true;
             } else if host.contains("hentai.org") && segments.len() == 4 && segments[0] == "g" {
@@ -171,7 +169,7 @@ where
                 if let Some(page_str) = segments.last() {
                     if let Ok(page) = page_str.parse::<usize>() {
                         start_page = Some(page);
-                        segments.pop(); // 弹出被识别为页码的段落
+                        segments.pop(); 
                         let new_path = segments.join("/") + "/";
                         parsed_url.set_path(&new_path);
                         clean_url = parsed_url.to_string();
@@ -180,10 +178,11 @@ where
             }
         }
 
-        // 步骤 2：提取跟在 URL 之后的空格数字参数 (兼容如 "url/3 16" 的混合格式)
         if let Some(idx) = text.find(raw_url) {
             let after_url = &text[idx + raw_url.len()..];
-            let parts: Vec<&str> = after_url.split_whitespace().collect();
+            // <--- 核心修复：把所有紧挨着的斜杠 `/` 替换为空格，解决 `.../73b65a/1 10` 被拆坏的问题
+            let cleaned_after = after_url.replace('/', " ");
+            let parts: Vec<&str> = cleaned_after.split_whitespace().collect();
             
             let mut numbers = Vec::new();
             for part in parts {
@@ -193,21 +192,18 @@ where
             }
 
             if numbers.len() >= 2 {
-                // 有两个数字，完全覆盖起止
                 start_page = Some(numbers[0]);
                 end_page = Some(numbers[1]);
             } else if numbers.len() == 1 {
-                if let Some(s) = start_page {
-                    // 已有斜杠页码，新的数字作为终止页码 (e.g., url/3 16)
+                if let Some(_) = start_page {
                     end_page = Some(numbers[0]);
                 } else {
-                    // 单个空格数字作为唯一页码 (e.g., url 3)
                     start_page = Some(numbers[0]);
                     end_page = Some(numbers[0]);
                 }
             } else {
                 if start_page.is_some() {
-                    end_page = start_page; // 仅有斜杠
+                    end_page = start_page;
                 }
             }
         } else {
@@ -216,7 +212,6 @@ where
             }
         }
 
-        // 步骤 3：防呆校正，保证 start 永远 <= end
         if let (Some(s), Some(e)) = (start_page, end_page) {
             let (real_s, real_e) = if s > e { (e, s) } else { (s, e) };
             return (clean_url, Some(real_s), Some(real_e));
@@ -225,9 +220,6 @@ where
         (clean_url, start_page, end_page)
     }
 
-    // =========================================================================
-    // 核心修改 2：统一入口路由分发
-    // =========================================================================
     async fn trigger_sync(
         &'static self,
         bot: DefaultParseMode<Bot>,
@@ -237,7 +229,6 @@ where
         extracted_url: &str,
         full_text: &str,
     ) {
-        // 利用全能解析器完美得出纯净的 URL 和正确的范围
         let (url, start_page, end_page) = Self::parse_url_and_ranges(extracted_url, full_text);
         
         let prompt_msg: Message = match bot.send_message(chat_id, escape(&format!("Syncing url {url}"))).reply_to_message_id(reply_msg_id).await {
@@ -249,14 +240,12 @@ where
         let url_clone = url.clone();
         let cancel_rx = self.register_sync(user_id, &url);
 
-        // 计算相差页数 (Difference)
         let diff = match (start_page, end_page) {
             (Some(s), Some(e)) => e.saturating_sub(s),
             _ => usize::MAX, 
         };
 
         if diff <= 5 {
-            // 当 起始页面跟终止页面 相差 <= 5 页时，触发相册直发 (最大6图)
             let s = start_page.unwrap();
             let e = end_page.unwrap();
             tokio::spawn(async move {
@@ -264,7 +253,6 @@ where
                 self.unregister_sync(user_id, &url_clone);
             });
         } else {
-            // 当相差 > 5页，或者未传页码全量下载时，走 Telegraph 机制（自动触发 Create & Edit 黑科技）
             tokio::spawn(async move {
                 let result = self.sync_range_response(&url_clone, start_page, end_page, cancel_rx).await;
                 self.unregister_sync(user_id, &url_clone);
@@ -273,9 +261,6 @@ where
         }
     }
 
-    // =========================================================================
-    // 触发生命周期 (监听命令 / 文本 / 媒体)
-    // =========================================================================
     pub async fn respond_cmd(
         &'static self,
         bot: DefaultParseMode<Bot>,
