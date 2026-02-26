@@ -45,7 +45,7 @@ pub enum Command {
     Help,
     #[command(description = "顯示機器人版本")]
     Version,
-    #[command(description = "取消所有正在進行的同步操作。")]
+    #[command(description = "取消所有正在進行的同步操作")]
     Cancel,
 }
 
