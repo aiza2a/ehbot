@@ -33,21 +33,11 @@ const MIN_SIMILARITY: u8 = 70;
 const MIN_SIMILARITY_PRIVATE: u8 = 50;
 
 #[derive(BotCommands, Clone)]
-#[command(
-    rename_rule = "lowercase",
-    description = "\
-    ✨ 嗨！這裡是 薄青~\n\n\
-    🚀 本機器人採用白名單模式，支持畫廊全量與片段同步\n\
-       您可以直接發送鏈接，或使用指令：\n\
-    👉 格式：/sync <url> <start> <end>\n\
-        💡 示例 1：/sync <url> 3 (單頁直發)\n\
-        💡 示例 2：/sync <url> 3 16 (抓取 3-16 頁，少於5頁時以圖片組發送)\n\n\
-    👇 可用指令列表："
-)]
+#[command(rename_rule = "lowercase")]
 pub enum Command {
     #[command(description = "顯示帳號ID")]
     Id,
-    #[command(description = "同步一個畫廊")]
+    #[command(description = "同步指定畫廊")]
     Sync(String),
     #[command(description = "顯示此幫助信息")]
     Help,
@@ -237,9 +227,9 @@ where
         
         // 根據解析出的頁碼，動態構建要顯示的提示字串
         let display_target = match (start_page, end_page) {
-            (Some(s), Some(e)) if s != e => format!("{} {} {}", url, s, e), // 有範圍 (如: url 2 10)
-            (Some(s), _) => format!("{} {}", url, s),                       // 只有單頁 (如: url 3)
-            _ => url.clone(),                                               // 全量下載 (如: url)
+            (Some(s), Some(e)) if s != e => format!("{} {} {}", url, s, e), 
+            (Some(s), _) => format!("{} {}", url, s),                       
+            _ => url.clone(),                                               
         };
         
         let prompt_text = format!("正在同步 < {} > 中！", display_target);
@@ -282,7 +272,23 @@ where
         command: Command,
     ) -> ControlFlow<()> {
         match command {
-            Command::Help => { let _ = bot.send_message(msg.chat.id, escape(&Command::descriptions().to_string())).reply_to_message_id(msg.id).await; }
+            //Command::Help => { let _ = bot.send_message(msg.chat.id, escape(&Command::descriptions().to_string())).reply_to_message_id(msg.id).await; }
+            Command::Help => { 
+                // 手動編寫並已嚴格轉義的 MarkdownV2 引言
+                let intro = "嗨\\! 這裡是 *薄青*\\~\n\n\
+                本機器人采用白名單模式，支持畫廊全量與片段同步\n\
+                您可以直接發送鏈接，或使用指令：\n\
+                ► 格式：`/sync <url> <start> <end>`\n\
+                    ▻ 示例 1：`/sync <url> 3` \\(單頁直發\\)\n\
+                    ▻ 示例 2：`/sync <url> 3 16` \\(抓取 3\\-16 頁，少於 5 頁時以圖片組發送\\)\n\n\
+                *可用指令列表：*\n";
+
+                // 僅對動態生成的指令列表進行轉義，防止破壞整體 Markdown 格式
+                let cmds = escape(&Command::descriptions().to_string());
+                let text = format!("{}{}", intro, cmds);
+
+                let _ = bot.send_message(msg.chat.id, text).reply_to_message_id(msg.id).await; 
+            }
             Command::Version => { let _ = bot.send_message(msg.chat.id, escape(crate::version::VERSION)).reply_to_message_id(msg.id).await; }
             Command::Id => { let _ = bot.send_message(msg.chat.id, format!("目前的 Chat ID 為·{}", code_inline(&msg.chat.id.to_string()))).reply_to_message_id(msg.id).await; }
             Command::Cancel => {
@@ -437,10 +443,12 @@ where
                         };
 
                         if let Some(meta) = meta_opt {
-                            let title_display = format!("{} ({})", meta.name, url_clone);
+
+                            let title_display = meta.name.clone();
                             let title_link = link(&url_clone, &escape(&title_display));
                             let title_bold = format!("*{}*", title_link);
-                            let preview_display = format!("〔 即 時 預 覽  ({}) 〕", sync_url);
+
+                            let preview_display = "〔 即 時 預 覽 〕".to_string();
                             let preview_link = link(&sync_url, &escape(&preview_display));
                             let preview_bold = format!("*{}*", preview_link);
 
@@ -450,7 +458,7 @@ where
                             )
                         } else {
                             // 降級顯示 (如果萬一沒抓取到 Meta)
-                            let preview_display = format!("〔 即 時 預 覽  ({}) 〕", sync_url);
+                            let preview_display = "〔 即 時 預 覽 〕".to_string();
                             let preview_link = link(&sync_url, &escape(&preview_display));
                             let preview_bold = format!("*{}*", preview_link);
 
@@ -515,12 +523,11 @@ where
                         
                         // 1. 動態判斷是單頁還是多頁範圍
                         let title_text = if start == end {
-                            format!("{}┆(ᴘᴀɢᴇ: {})", meta.name, start)
+                            format!("{} ┆ ᴘᴀɢᴇ: {}", meta.name, start)
                         } else {
-                            format!("{}┆(ᴘᴀɢᴇꜱ: {}-{})", meta.name, start, end)
+                            format!("{} ┆ ᴘᴀɢᴇꜱ: {}-{}", meta.name, start, end)
                         };
-                        
-                        // 2. 對標題進行轉義，避免 MarkdownV2 報錯
+
                         let display_title = escape(&title_text);
                         let caption = format!("*{}*", link(&meta.link, &display_title));
 
