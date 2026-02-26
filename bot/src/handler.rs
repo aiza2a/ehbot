@@ -202,7 +202,10 @@ where
                 }
 
                 info!("[cmd handler] receive sync request from {:?} for {raw_url}", PrettyChat(&msg.chat));
-                let msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {raw_url}"))).reply_to_message_id(msg.id).await);
+                
+                let original_msg_id = msg.id;
+                let prompt_msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {raw_url}"))).reply_to_message_id(original_msg_id).await);
+                let prompt_msg_id = prompt_msg.id;
 
                 let url_clone = raw_url.clone();
                 let cancel_rx = self.register_sync(msg.chat.id.0, &raw_url);
@@ -216,14 +219,14 @@ where
                     let s = start_page.unwrap();
                     let e = end_page.unwrap();
                     tokio::spawn(async move {
-                        self.send_media_group_response(&bot, msg.chat.id, msg.id, &url_clone, s, e, cancel_rx).await;
+                        self.send_media_group_response(&bot, msg.chat.id, prompt_msg_id, original_msg_id, &url_clone, s, e, cancel_rx).await;
                         self.unregister_sync(msg.chat.id.0, &url_clone);
                     });
                 } else {
                     tokio::spawn(async move {
                         let result = self.sync_range_response(&url_clone, start_page, end_page, cancel_rx).await;
                         self.unregister_sync(msg.chat.id.0, &url_clone);
-                        let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
+                        let _ = bot.edit_message_text(msg.chat.id, prompt_msg_id, result).await;
                     });
                 }
             }
@@ -252,13 +255,15 @@ where
         };
 
         if let Some(url) = maybe_link {
-            let msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(msg.id).await);
+            let original_msg_id = msg.id;
+            let prompt_msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(original_msg_id).await);
+            
             let url_clone = url.clone();
             let cancel_rx = self.register_sync(msg.chat.id.0, &url);
             tokio::spawn(async move {
                 let result = self.sync_range_response(&url, None, None, cancel_rx).await;
                 self.unregister_sync(msg.chat.id.0, &url_clone);
-                let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
+                let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, result).await;
             });
             return ControlFlow::Break(());
         }
@@ -290,13 +295,15 @@ where
         }
 
         if let Some(url) = final_url {
-            let msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(msg.id).await);
+            let original_msg_id = msg.id;
+            let prompt_msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(original_msg_id).await);
+            
             let url_clone = url.clone();
             let cancel_rx = self.register_sync(msg.chat.id.0, &url);
             tokio::spawn(async move {
                 let result = self.sync_range_response(&url, None, None, cancel_rx).await;
                 self.unregister_sync(msg.chat.id.0, &url_clone);
-                let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
+                let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, result).await;
             });
             return ControlFlow::Break(());
         }
@@ -336,13 +343,14 @@ where
         }
 
         if let Some((url, _)) = url_sim {
-            if let Ok(msg) = bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(msg.id).await {
+            let original_msg_id = msg.id;
+            if let Ok(prompt_msg) = bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(original_msg_id).await {
                 let url_clone = url.clone();
                 let cancel_rx = self.register_sync(msg.chat.id.0, &url);
                 tokio::spawn(async move {
                     let result = self.sync_range_response(&url, None, None, cancel_rx).await;
                     self.unregister_sync(msg.chat.id.0, &url_clone);
-                    let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
+                    let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, result).await;
                 });
             }
             return ControlFlow::Break(());
@@ -401,7 +409,8 @@ where
         &self,
         bot: &DefaultParseMode<Bot>,
         chat_id: ChatId,
-        msg_id: MessageId,
+        prompt_msg_id: MessageId,
+        reply_msg_id: MessageId,
         url: &str,
         start: usize,
         end: usize,
@@ -409,11 +418,10 @@ where
     ) {
         let url_clone = url.to_string();
         let flight_key = format!("{}|{}|{}", url, start, end);
+        // let flight_key = format!("{}|{}|{}", url, start, end); // 这行不需要了可以删掉或注释
         
         tokio::select! {
-            result = self.single_flight.work(&flight_key, || async {
-                self.route_fetch_images(&url_clone, start, end).await
-            }) => {
+            result = self.route_fetch_images(&url_clone, start, end) => {
                 match result {
                     Ok((meta, images)) if !images.is_empty() => {
                         let mut media_group = Vec::new();
@@ -421,25 +429,28 @@ where
                         let caption = link(&meta.link, &display_title);
 
                         for (i, (_img_meta, data)) in images.into_iter().enumerate() {
-                            let mut photo = InputMediaPhoto::new(InputFile::memory(data));
+                            // 加上 .as_ref().to_owned() 嚴格適配 InputFile::memory 的 trait bound
+                            let mut photo = InputMediaPhoto::new(InputFile::memory(data.as_ref().to_owned()));
                             if i == 0 {
                                 photo = photo.caption(caption.clone()).parse_mode(ParseMode::MarkdownV2);
                             }
                             media_group.push(InputMedia::Photo(photo));
                         }
 
-                        if let Ok(_) = bot.send_media_group(chat_id, media_group).reply_to_message_id(msg_id).await {
-                            let _ = bot.delete_message(chat_id, msg_id).await;
+                        // 精準回覆用戶最初的指令
+                        if let Ok(_) = bot.send_media_group(chat_id, media_group).reply_to_message_id(reply_msg_id).await {
+                            // 靜默刪除 Syncing url... 提示
+                            let _ = bot.delete_message(chat_id, prompt_msg_id).await;
                         } else {
-                            let _ = bot.edit_message_text(chat_id, msg_id, escape("Failed to send media group.")).await;
+                            let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Failed to send media group.")).await;
                         }
                     },
-                    Ok(_) => { let _ = bot.edit_message_text(chat_id, msg_id, escape("Failed: No images found in this range.")).await; },
-                    Err(e) => { let _ = bot.edit_message_text(chat_id, msg_id, escape(&format!("Fetch failed: {}", e))).await; }
+                    Ok(_) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Failed: No images found in this range.")).await; },
+                    Err(e) => { let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape(&format!("Fetch failed: {}", e))).await; }
                 }
             },
             _ = &mut cancel_rx => {
-                 let _ = bot.edit_message_text(chat_id, msg_id, escape("Operation cancelled by user.")).await;
+                 let _ = bot.edit_message_text(chat_id, prompt_msg_id, escape("Operation cancelled by user.")).await;
             }
         }
     }
