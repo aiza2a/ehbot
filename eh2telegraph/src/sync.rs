@@ -8,7 +8,7 @@ use crate::{
     storage::{cloudflare_kv::CFStorage, KVStorage},
     stream::{AsyncStream, Buffered},
     telegraph::{
-        types::{Node, NodeElement, NodeElementAttr, Page, PageCreate, Tag},
+        types::{Node, NodeElement, NodeElementAttr, Page, PageCreate, PageEdit, Tag},
         RandomAccessToken, Telegraph, TelegraphError, MAX_SINGLE_FILE_SIZE,
     },
     util::match_first_group,
@@ -25,6 +25,8 @@ pub enum UploadError<SE> {
     Stream(SE),
     #[error("telegraph error {0}")]
     Reqwest(#[from] TelegraphError),
+    #[error("No images found in the specified range")]
+    EmptyResult,
 }
 
 pub struct Synchronizer<C = CFStorage> {
@@ -43,7 +45,6 @@ impl<CACHE> Synchronizer<CACHE>
 where
     CACHE: KVStorage<String>,
 {
-    // cache ttl is 45 days
     const DEFAULT_CACHE_TTL: usize = 3600 * 24 * 45;
 
     pub fn new(
@@ -82,7 +83,13 @@ where
         self.cache.delete(key).await
     }
 
-    pub async fn sync<C: Collector>(&self, path: String) -> anyhow::Result<String>
+    /// 專供小範圍圖片直出：只下載並返回圖片二進制數據，跳過所有 Telegraph 邏輯
+    pub async fn fetch_images_only<C: Collector>(
+        &self,
+        path: String,
+        start_page: usize,
+        end_page: usize,
+    ) -> anyhow::Result<(AlbumMeta, Vec<(ImageMeta, ImageData)>)>
     where
         Registry: Param<C>,
         C::FetchError: Into<anyhow::Error> + Send + 'static,
@@ -91,10 +98,57 @@ where
         C::ImageStream: Send + 'static,
         <C::ImageStream as AsyncStream>::Future: Send + 'static,
     {
-        // check cache
         let path = path.trim_end_matches('/').to_string();
-        let original_cache_key = format!("{}|{}", C::name(), path);
-        let cache_key = original_cache_key.replace("exhentai", "e-hentai");
+        let collector: &C = self.registry.get();
+        let (meta, mut stream) = collector.fetch(path).await.map_err(Into::into)?;
+
+        // 高效跳過不需要的開頭頁（零開銷網絡）
+        for _ in 1..start_page {
+            if stream.next().is_none() {
+                break;
+            }
+        }
+
+        let mut images = Vec::new();
+        let mut current_idx = start_page;
+
+        // 收集指定範圍內的圖片
+        while let Some(fut) = stream.next() {
+            if current_idx > end_page {
+                break;
+            }
+            if let Ok(data) = fut.await.map_err(Into::into) {
+                images.push(data);
+            }
+            current_idx += 1;
+        }
+
+        Ok((meta, images))
+    }
+
+    pub async fn sync<C: Collector>(
+        &self,
+        path: String,
+        start_page: Option<usize>,
+        end_page: Option<usize>,
+    ) -> anyhow::Result<String>
+    where
+        Registry: Param<C>,
+        C::FetchError: Into<anyhow::Error> + Send + 'static,
+        C::StreamError:
+            Into<anyhow::Error> + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
+        C::ImageStream: Send + 'static,
+        <C::ImageStream as AsyncStream>::Future: Send + 'static,
+    {
+        let path = path.trim_end_matches('/').to_string();
+        
+        // 緩存隔離：不同範圍的請求不能命中全量緩存
+        let mut cache_key = format!("{}|{}", C::name(), path);
+        if start_page.is_some() || end_page.is_some() {
+            cache_key = format!("{}|s:{:?}|e:{:?}", cache_key, start_page, end_page);
+        }
+        let cache_key = cache_key.replace("exhentai", "e-hentai");
+
         if let Ok(Some(v)) = self.cache.get(&cache_key).await {
             tracing::info!("[cache] hit key {cache_key}");
             return Ok(v);
@@ -104,11 +158,10 @@ where
         let collector: &C = self.registry.get();
         let (meta, stream) = collector.fetch(path).await.map_err(Into::into)?;
         let page = self
-            .sync_stream(meta, stream)
+            .sync_stream(meta, stream, start_page, end_page)
             .await
             .map_err(anyhow::Error::from)?;
 
-        // set cache
         let _ = self
             .cache
             .set(
@@ -123,22 +176,27 @@ where
     pub async fn sync_stream<S, SE>(
         &self,
         meta: AlbumMeta,
-        stream: S,
+        mut stream: S,
+        start_page: Option<usize>,
+        end_page: Option<usize>,
     ) -> Result<Page, UploadError<SE>>
     where
         SE: Send + std::fmt::Debug + 'static,
         S: AsyncStream<Item = Result<(ImageMeta, ImageData), SE>>,
         S::Future: Send + 'static,
     {
+        let start_idx = start_page.unwrap_or(1);
+        for _ in 1..start_idx {
+            if stream.next().is_none() {
+                break;
+            }
+        }
+
         let buffered_stream = Buffered::new(stream, self.limit.unwrap_or(DEFAULT_CONCURRENT));
-        let r = self.inner_sync_stream(meta, buffered_stream).await;
+        let r = self.inner_sync_stream(meta, buffered_stream, start_idx, end_page).await;
         match &r {
-            Ok(p) => {
-                tracing::info!("[sync] sync success with url {}", p.url);
-            }
-            Err(e) => {
-                tracing::error!("[sync] sync fail! {e:?}");
-            }
+            Ok(p) => tracing::info!("[sync] sync success with url {}", p.url),
+            Err(e) => tracing::error!("[sync] sync fail! {e:?}"),
         }
         r
     }
@@ -147,59 +205,65 @@ where
         &self,
         meta: AlbumMeta,
         mut stream: S,
+        start_idx: usize,
+        end_idx: Option<usize>,
     ) -> Result<Page, UploadError<SE>>
     where
         S: AsyncStream<Item = Result<(ImageMeta, ImageData), SE>>,
     {
         let mut err_count = 0;
         let mut uploaded = Vec::new();
-
         let mut buffer = ImageBuffer::new();
+        let mut current_idx = start_idx;
+        let mut finished_fetching = false;
 
-        // in this big loop, we will download images, and upload them in batch.
-        // then, all meta info will be saved in `uploaded`.
         loop {
-            // TODO: load images one by one is too slow!
-            // We can spawn a background task(FuturesUnordered) and use channel, but expose as AsyncStream,
-            // which does not require changes on consuming side.
-
-            // 1. download images in batch
-            while let Some(fut) = stream.next() {
-                let data = match fut.await {
-                    Err(e) => {
-                        err_count += 1;
-                        if err_count > ERR_THRESHOLD {
-                            return Err(UploadError::Stream(e));
+            if !finished_fetching {
+                while let Some(fut) = stream.next() {
+                    // 提前截斷流
+                    if let Some(e) = end_idx {
+                        if current_idx > e {
+                            finished_fetching = true;
+                            break;
                         }
+                    }
+
+                    let data = match fut.await {
+                        Err(e) => {
+                            err_count += 1;
+                            if err_count > ERR_THRESHOLD {
+                                return Err(UploadError::Stream(e));
+                            }
+                            continue;
+                        }
+                        Ok(d) => {
+                            err_count = 0;
+                            d
+                        }
+                    };
+
+                    if data.1.len() >= MAX_SINGLE_FILE_SIZE {
+                        tracing::error!("Too big file, discarded. Meta: {:?}", data.0);
+                        current_idx += 1;
                         continue;
                     }
-                    Ok(d) => {
-                        err_count = 0;
-                        d
+
+                    buffer.push(data);
+                    current_idx += 1;
+
+                    if buffer.len() > BATCH_LEN_THRESHOLD || buffer.size() > BATCH_SIZE_THRESHOLD {
+                        break;
                     }
-                };
-
-                // if the data size is too big to upload, we will discard it.
-                if data.1.len() >= MAX_SINGLE_FILE_SIZE {
-                    tracing::error!("Too big file, discarded. Meta: {:?}", data.0);
-                    continue;
-                }
-
-                buffer.push(data);
-                if buffer.len() > BATCH_LEN_THRESHOLD || buffer.size() > BATCH_SIZE_THRESHOLD {
-                    break;
                 }
             }
-            // all data is uploaded, and no data to process.
-            // just break the big loop.
+            
             if buffer.is_empty() {
                 break;
             }
 
-            // 2. upload the batch
             let (full_data, size) = buffer.swap();
             let image_count = full_data.len();
-            tracing::debug!("download {image_count} images with size {size}, will upload them",);
+            tracing::debug!("download {image_count} images with size {size}, will upload them");
 
             let (meta, data) = full_data
                 .into_iter()
@@ -208,8 +272,6 @@ where
             let medium = self.tg.upload(data).await?;
             err_count = 0;
 
-            // 3. add to uploaded
-            tracing::debug!("upload {image_count} images with size {size}, medium: {medium:?}");
             uploaded.extend(
                 meta.into_iter()
                     .zip(medium.into_iter().map(|x| x.src))
@@ -217,8 +279,10 @@ where
             );
         }
 
-        // create telegraph page, or multi pages
-        // Telegraph has 64K limit, since our estimate is not accurate, here we use 48K.
+        if uploaded.is_empty() {
+            return Err(UploadError::EmptyResult);
+        }
+
         const PAGE_SIZE_LIMIT: usize = 48 * 1024;
         let mut chunks = Vec::with_capacity(8);
         chunks.push(Vec::new());
@@ -234,7 +298,16 @@ where
         }
 
         let mut last_page: Option<Page> = None;
-        let title = meta.name.replace('|', "");
+        let original_title = meta.name.replace('|', "");
+        
+        // 生成用於污染 URL 的偽造標題
+        let mut title_for_creation = original_title.clone();
+        if let (Some(s), Some(e)) = (Some(start_idx), end_idx) {
+            if s > 1 || e > 1 {
+                title_for_creation = format!("{} {}-{}", original_title, s, e);
+            }
+        }
+
         while let Some(last_chunk) = chunks.pop() {
             let mut content = last_chunk;
             write_footer(
@@ -242,16 +315,25 @@ where
                 meta.link.as_str(),
                 last_page.as_ref().map(|p| p.url.as_str()),
             );
-            let title = match chunks.len() {
-                0 => title.clone(),
-                n => format!("{}-Page{}", title, n + 1),
+            
+            let current_fake_title = match chunks.len() {
+                0 => title_for_creation.clone(),
+                n => format!("{}-Page{}", title_for_creation, n + 1),
             };
+            let current_clean_title = match chunks.len() {
+                0 => original_title.clone(),
+                n => format!("{}-Page{}", original_title, n + 1),
+            };
+
             tracing::debug!("create page with content: {content:?}");
-            let page = self
+            let need_edit = title_for_creation != original_title;
+
+            // 第一步：創建含有數字 URL 的頁面
+            let mut page = self
                 .tg
                 .create_page(&PageCreate {
-                    title,
-                    content,
+                    title: current_fake_title,
+                    content: content.clone(),
                     author_name: self
                         .author_name
                         .clone()
@@ -260,6 +342,24 @@ where
                 })
                 .await
                 .map_err(UploadError::Reqwest)?;
+
+            // 第二步：修改回原本乾淨的標題
+            if need_edit {
+                page = self
+                    .tg
+                    .edit_page(&PageEdit {
+                        title: current_clean_title,
+                        path: page.path.clone(),
+                        content,
+                        author_name: self
+                            .author_name
+                            .clone()
+                            .or_else(|| meta.authors.as_ref().map(|x| x.join(", "))),
+                        author_url: self.author_url.clone(),
+                    })
+                    .await
+                    .map_err(UploadError::Reqwest)?;
+            }
 
             last_page = Some(page);
         }
@@ -306,7 +406,6 @@ struct UploadedImage {
 
 impl From<UploadedImage> for Node {
     fn from(i: UploadedImage) -> Self {
-        // Use the full URL directly since catbox.moe returns complete URLs
         Node::new_image(&i.src)
     }
 }
