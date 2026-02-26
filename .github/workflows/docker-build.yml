@@ -22,7 +22,7 @@ jobs:
         id: prep
         if: "startsWith(github.ref, 'refs/tags/v')"
         run: |
-          echo ::set-output name=tags::ghcr.io/aiza2a/iehbot:${GITHUB_REF#refs/tags/v}
+          echo ::set-output name=tags::ghcr.io/aiza2a/ehbot:${GITHUB_REF#refs/tags/v}
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v1
         with:
@@ -44,5 +44,5 @@ jobs:
           push: true
           platforms: linux/amd64
           tags: |
-            ghcr.io/aiza2a/iehbot:latest
-            ghcr.io/aiza2a/iehbot:${{ env.VERSIONED_TAG }}
+            ghcr.io/aiza2a/ehbot:latest
+            ghcr.io/aiza2a/ehbot:${{ env.VERSIONED_TAG }}
