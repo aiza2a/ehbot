@@ -1,8 +1,10 @@
 use std::{borrow::Cow, collections::HashSet, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use eh2telegraph::{
-    collector::{e_hentai::EHCollector, exhentai::EXCollector, nhentai::NHCollector},
-    config::{self, WhitelistConfig}, // Add whitelist
+    collector::{e_hentai::EHCollector, exhentai::EXCollector, nhentai::NHCollector, AlbumMeta, ImageMeta, ImageData},
+    config::{self, WhitelistConfig},
     searcher::{
         f_hash::FHashConvertor,
         saucenao::{SaucenaoOutput, SaucenaoParsed, SaucenaoSearcher},
@@ -13,11 +15,10 @@ use eh2telegraph::{
 };
 
 use reqwest::Url;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use teloxide::{
     adaptors::DefaultParseMode,
     prelude::*,
+    types::{InputMedia, InputMediaPhoto, InputFile, ParseMode, MessageId},
     utils::{
         command::BotCommands,
         markdown::{code_inline, escape, link},
@@ -36,26 +37,20 @@ const MIN_SIMILARITY_PRIVATE: u8 = 50;
     rename_rule = "lowercase",
     description = "\
     This is a gallery synchronization robot that is convenient for users to view pictures directly in Telegram.\n\
-    这是一个方便用户直接在 Telegram 里看图的画廊同步机器人。\n\
     Bot supports sync with command, text url, or image(private chat search thrashold is lower).\n\
-    机器人支持通过 命令、直接发送链接、图片(私聊搜索相似度阈值会更低) 的形式同步。\n\n\
-    Bot develop group / Bot 开发群 https://t.me/TGSyncBotWorkGroup\n\
-    And welcome to join image channel / 频道推荐 https://t.me/sesecollection\n\n\
-    These commands are supported:\n\
-    目前支持这些指令:"
+    [New] Support range sync: /sync <url> <start> <end> (e.g., /sync url 3 16 or url/3)\n\n\
+    These commands are supported:"
 )]
 pub enum Command {
-    #[command(description = "Display this help. 显示这条帮助信息")]
+    #[command(description = "Display this help. 顯示這條幫助信息")]
     Help,
-    #[command(description = "Show bot verison. 显示机器人版本")]
+    #[command(description = "Show bot verison. 顯示機器人版本")]
     Version,
-    #[command(description = "Show your account id. 显示你的账号 ID")]
+    #[command(description = "Show your account id. 顯示你的帳號 ID")]
     Id,
-    #[command(
-        description = "Sync a gallery(e-hentai/exhentai/nhentai are supported now). 同步一个画廊(目前支持 EH/EX/NH)"
-    )]
+    #[command(description = "Sync a gallery. 同步一個畫廊(目前支持 EH/EX/NH)")]
     Sync(String),
-    #[command(description = "Cancel all ongoing sync operations. 取消所有正在进行的同步操作。")]
+    #[command(description = "Cancel all ongoing sync operations. 取消所有正在進行的同步操作。")]
     Cancel,
 }
 
@@ -71,11 +66,9 @@ pub struct Handler<C> {
     pub searcher: SaucenaoSearcher,
     pub convertor: FHashConvertor,
     pub admins: HashSet<i64>,
-    pub whitelist: HashSet<i64>, // Add whitelist
+    pub whitelist: HashSet<i64>,
 
     single_flight: singleflight_async::SingleFlight<String>,
-
-    // One user can have multiple active syncs
     active_syncs: Arc<Mutex<HashMap<i64, Vec<(String, oneshot::Sender<()>)>>>>,
 }
 
@@ -84,24 +77,15 @@ where
     C: KVStorage<String> + Send + Sync + 'static,
 {
     pub fn new(synchronizer: Synchronizer<C>, admins: HashSet<i64>) -> Self {
-        // Read whitelist ids
         let whitelist = match config::parse::<WhitelistConfig>("whitelist")
             .ok()
             .and_then(|x| x)
         {
             Some(config) => {
-                if config.enabled {
-                    // use ids in config
-                    config.ids.into_iter().collect()
-                } else {
-                    // Allow all ppl to use
-                    HashSet::from([i64::MIN])
-                }
+                if config.enabled { config.ids.into_iter().collect() } 
+                else { HashSet::from([i64::MIN]) }
             }
-            None => {
-                // No whitelist, all ppl can use
-                HashSet::from([i64::MIN])
-            }
+            None => HashSet::from([i64::MIN]),
         };
 
         Self {
@@ -115,36 +99,25 @@ where
         }
     }
 
-    // Whitelist is allowed to use
     fn is_allowed(&self, chat_id: i64) -> bool {
-        if self.admins.contains(&chat_id) {
-            return true;
-        }
-        if self.whitelist.contains(&i64::MIN) {
+        if self.admins.contains(&chat_id) || self.whitelist.contains(&i64::MIN) {
             return true;
         }
         self.whitelist.contains(&chat_id)
     }
 
-    // Support Multiple Sync Task
     fn register_sync(&self, user_id: i64, url: &str) -> oneshot::Receiver<()> {
         let (tx, rx) = oneshot::channel();
-
         let mut active_syncs = self.active_syncs.lock().unwrap();
-
         let user_syncs = active_syncs.entry(user_id).or_insert_with(Vec::new);
-
         user_syncs.push((url.to_string(), tx));
-
         rx
     }
 
     fn unregister_sync(&self, user_id: i64, url: &str) {
         let mut active_syncs = self.active_syncs.lock().unwrap();
-        
         if let Some(user_syncs) = active_syncs.get_mut(&user_id) {
             user_syncs.retain(|(sync_url, _)| sync_url != url);
-            
             if user_syncs.is_empty() {
                 active_syncs.remove(&user_id);
             }
@@ -153,42 +126,23 @@ where
 
     fn cancel_all_syncs(&self, user_id: i64) -> usize {
         let mut active_syncs = self.active_syncs.lock().unwrap();
-
         if let Some(user_syncs) = active_syncs.remove(&user_id) {
             let count = user_syncs.len();
-
-            // Send all cancellation signal
-            for (url, tx) in user_syncs {
-                info!(
-                    "[cancel handler] cancelling sync for user {} and url {}",
-                    user_id, url
-                );
+            for (_, tx) in user_syncs {
                 let _ = tx.send(());
             }
-
-            info!(
-                "[cancel handler] user {} cancelled {} sync operations",
-                user_id, count
-            );
-
             count
         } else {
             0
         }
     }
 
-    // Add unauthorized response
     async fn send_unauthorized(&self, bot: &DefaultParseMode<Bot>, msg: &Message) {
-        // Only send in PM
         if msg.chat.is_private() {
-            let _ = bot
-                .send_message(msg.chat.id, escape("User not authorized!"))
-                .reply_to_message_id(msg.id)
-                .await;
+            let _ = bot.send_message(msg.chat.id, escape("User not authorized!")).reply_to_message_id(msg.id).await;
         }
     }
 
-    /// Executed when a command comes in and parsed successfully.
     pub async fn respond_cmd(
         &'static self,
         bot: DefaultParseMode<Bot>,
@@ -196,174 +150,122 @@ where
         command: Command,
     ) -> ControlFlow<()> {
         match command {
-            Command::Help => {
-                let _ = bot
-                    .send_message(msg.chat.id, escape(&Command::descriptions().to_string()))
-                    .reply_to_message_id(msg.id)
-                    .await;
+            Command::Help => { let _ = bot.send_message(msg.chat.id, escape(&Command::descriptions().to_string())).reply_to_message_id(msg.id).await; }
+            Command::Version => { let _ = bot.send_message(msg.chat.id, escape(crate::version::VERSION)).reply_to_message_id(msg.id).await; }
+            Command::Id => { let _ = bot.send_message(msg.chat.id, format!("Current chat id is {}", code_inline(&msg.chat.id.to_string()))).reply_to_message_id(msg.id).await; }
+            Command::Cancel => {
+                let count = self.cancel_all_syncs(msg.chat.id.0);
+                let text = if count > 0 { format!("Cancelled {} sync operations.", count) } else { "No active sync operations.".to_string() };
+                let _ = bot.send_message(msg.chat.id, escape(&text)).reply_to_message_id(msg.id).await;
             }
-            Command::Version => {
-                let _ = bot
-                    .send_message(msg.chat.id, escape(crate::version::VERSION))
-                    .reply_to_message_id(msg.id)
-                    .await;
-            }
-            Command::Id => {
-                let _ = bot
-                    .send_message(
-                        msg.chat.id,
-                        format!(
-                            "Current chat id is {} \\(in private chat this is your account id\\)",
-                            code_inline(&msg.chat.id.to_string())
-                        ),
-                    )
-                    .reply_to_message_id(msg.id)
-                    .await;
-            }
-            Command::Sync(url) => {
-                // Add white list check
+            Command::Sync(input) => {
                 if !self.is_allowed(msg.chat.id.0) {
                     self.send_unauthorized(&bot, &msg).await;
                     return ControlFlow::Break(());
                 }
-                if url.is_empty() {
-                    let _ = bot
-                        .send_message(msg.chat.id, escape("Usage: /sync url"))
-                        .reply_to_message_id(msg.id)
-                        .await;
+                if input.is_empty() {
+                    let _ = bot.send_message(msg.chat.id, escape("Usage: /sync url [start] [end]")).reply_to_message_id(msg.id).await;
                     return ControlFlow::Break(());
                 }
 
-                info!(
-                    "[cmd handler] receive sync request from {:?} for {url}",
-                    PrettyChat(&msg.chat)
-                );
-                let msg: Message = ok_or_break!(
-                    bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}")))
-                        .reply_to_message_id(msg.id)
-                        .await
-                );
+                let parts: Vec<&str> = input.split_whitespace().collect();
+                let mut raw_url = parts.first().unwrap_or(&"").to_string();
+                let mut start_page: Option<usize> = None;
+                let mut end_page: Option<usize> = None;
 
-                let url_clone = url.clone();
-                let cancel_rx = self.register_sync(msg.chat.id.0, &url);
+                if let Ok(mut parsed_url) = Url::parse(&raw_url) {
+                    if let Some(last_seg) = parsed_url.path_segments().and_then(|s| s.last()) {
+                        if let Ok(page) = last_seg.parse::<usize>() {
+                            start_page = Some(page);
+                            end_page = Some(page);
+                            parsed_url.path_segments_mut().unwrap().pop();
+                            raw_url = parsed_url.to_string();
+                        }
+                    }
+                }
 
-                tokio::spawn(async move {
-                    let result = self.sync_response(&url, cancel_rx).await;
+                if parts.len() == 2 {
+                    if let Ok(p) = parts[1].parse::<usize>() {
+                        start_page = Some(p);
+                        end_page = Some(p);
+                    }
+                } else if parts.len() >= 3 {
+                    start_page = parts[1].parse::<usize>().ok();
+                    end_page = parts[2].parse::<usize>().ok();
+                }
 
-                    self.unregister_sync(msg.chat.id.0, &url_clone);
+                if let (Some(s), Some(e)) = (start_page, end_page) {
+                    if s > e {
+                        start_page = Some(e);
+                        end_page = Some(s);
+                    }
+                }
 
-                    let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
-                });
-            }
-            Command::Cancel => {
-                let cancelled_count = self.cancel_all_syncs(msg.chat.id.0);
-                if cancelled_count > 0 {
-                    let _ = bot
-                        .send_message(
-                            msg.chat.id,
-                            escape(&format!("Cancelled {} sync operations.", cancelled_count)),
-                        )
-                        .reply_to_message_id(msg.id)
-                        .await;
+                info!("[cmd handler] receive sync request from {:?} for {raw_url}", PrettyChat(&msg.chat));
+                let msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {raw_url}"))).reply_to_message_id(msg.id).await);
+
+                let url_clone = raw_url.clone();
+                let cancel_rx = self.register_sync(msg.chat.id.0, &raw_url);
+
+                let diff = match (start_page, end_page) {
+                    (Some(s), Some(e)) => e - s,
+                    _ => usize::MAX, 
+                };
+
+                if diff <= 5 {
+                    let s = start_page.unwrap();
+                    let e = end_page.unwrap();
+                    tokio::spawn(async move {
+                        self.send_media_group_response(&bot, msg.chat.id, msg.id, &url_clone, s, e, cancel_rx).await;
+                        self.unregister_sync(msg.chat.id.0, &url_clone);
+                    });
                 } else {
-                    let _ = bot
-                        .send_message(msg.chat.id, escape("No active sync operations to cancel."))
-                        .reply_to_message_id(msg.id)
-                        .await;
+                    tokio::spawn(async move {
+                        let result = self.sync_range_response(&url_clone, start_page, end_page, cancel_rx).await;
+                        self.unregister_sync(msg.chat.id.0, &url_clone);
+                        let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
+                    });
                 }
             }
         };
-
         ControlFlow::Break(())
     }
 
-    pub async fn respond_admin_cmd(
-        &'static self,
-        bot: DefaultParseMode<Bot>,
-        msg: Message,
-        command: AdminCommand,
-    ) -> ControlFlow<()> {
-        match command {
-            AdminCommand::Delete(key) => {
-                tokio::spawn(async move {
-                    let _ = self.synchronizer.delete_cache(&key).await;
-                    let _ = bot
-                        .send_message(msg.chat.id, escape(&format!("Key {key} deleted.")))
-                        .reply_to_message_id(msg.id)
-                        .await;
-                });
-                ControlFlow::Break(())
-            }
+    pub async fn respond_admin_cmd(&'static self, bot: DefaultParseMode<Bot>, msg: Message, command: AdminCommand) -> ControlFlow<()> {
+        if let AdminCommand::Delete(key) = command {
+            tokio::spawn(async move {
+                let _ = self.synchronizer.delete_cache(&key).await;
+                let _ = bot.send_message(msg.chat.id, escape(&format!("Key {key} deleted."))).reply_to_message_id(msg.id).await;
+            });
         }
+        ControlFlow::Break(())
     }
 
-    pub async fn respond_text(
-        &'static self,
-        bot: DefaultParseMode<Bot>,
-        msg: Message,
-    ) -> ControlFlow<()> {
-        // Add white list check
+    pub async fn respond_text(&'static self, bot: DefaultParseMode<Bot>, msg: Message) -> ControlFlow<()> {
         if !self.is_allowed(msg.chat.id.0) {
             self.send_unauthorized(&bot, &msg).await;
             return ControlFlow::Break(());
         }
         let maybe_link = {
-            let entries = msg
-                .entities()
-                .map(|es| {
-                    es.iter().filter_map(|e| {
-                        if let teloxide::types::MessageEntityKind::TextLink { url } = &e.kind {
-                            Synchronizer::match_url_from_text(url.as_ref()).map(ToOwned::to_owned)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .into_iter()
-                .flatten();
-            msg.text()
-                .and_then(|content| {
-                    Synchronizer::match_url_from_text(content).map(ToOwned::to_owned)
-                })
-                .into_iter()
-                .chain(entries)
-                .next()
+            let entries = msg.entities().map(|es| es.iter().filter_map(|e| if let teloxide::types::MessageEntityKind::TextLink { url } = &e.kind { Synchronizer::match_url_from_text(url.as_ref()).map(ToOwned::to_owned) } else { None })).into_iter().flatten();
+            msg.text().and_then(|content| Synchronizer::match_url_from_text(content).map(ToOwned::to_owned)).into_iter().chain(entries).next()
         };
 
         if let Some(url) = maybe_link {
-            info!(
-                "[text handler] receive sync request from {:?} for {url}",
-                PrettyChat(&msg.chat)
-            );
-            let msg: Message = ok_or_break!(
-                bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}")))
-                    .reply_to_message_id(msg.id)
-                    .await
-            );
-
+            let msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(msg.id).await);
             let url_clone = url.clone();
             let cancel_rx = self.register_sync(msg.chat.id.0, &url);
-
             tokio::spawn(async move {
-                let result = self.sync_response(&url, cancel_rx).await;
-
+                let result = self.sync_range_response(&url, None, None, cancel_rx).await;
                 self.unregister_sync(msg.chat.id.0, &url_clone);
-
                 let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
             });
             return ControlFlow::Break(());
         }
-
-        // fallback to the next branch
         ControlFlow::Continue(())
     }
 
-    pub async fn respond_caption(
-        &'static self,
-        bot: DefaultParseMode<Bot>,
-        msg: Message,
-    ) -> ControlFlow<()> {
-        // Add white list check
+    pub async fn respond_caption(&'static self, bot: DefaultParseMode<Bot>, msg: Message) -> ControlFlow<()> {
         if !self.is_allowed(msg.chat.id.0) {
             self.send_unauthorized(&bot, &msg).await;
             return ControlFlow::Break(());
@@ -373,74 +275,42 @@ where
         for entry in caption_entities.map(|x| x.iter()).into_iter().flatten() {
             let url = match &entry.kind {
                 teloxide::types::MessageEntityKind::Url => {
-                    let raw = msg
-                        .caption()
-                        .expect("Url MessageEntry found but caption is None");
-                    let encoded: Vec<_> = raw
-                        .encode_utf16()
-                        .skip(entry.offset)
-                        .take(entry.length)
-                        .collect();
+                    let raw = msg.caption().expect("Url MessageEntry found but caption is None");
+                    let encoded: Vec<_> = raw.encode_utf16().skip(entry.offset).take(entry.length).collect();
                     let content = ok_or_break!(String::from_utf16(&encoded));
                     Cow::from(content)
                 }
                 teloxide::types::MessageEntityKind::TextLink { url } => Cow::from(url.as_ref()),
-                _ => {
-                    continue;
-                }
+                _ => continue,
             };
-            let url = if let Some(c) = Synchronizer::match_url_from_url(&url) {
-                c
-            } else {
-                continue;
-            };
-            final_url = Some(url.to_string());
-            break;
-        }
-
-        match final_url {
-            Some(url) => {
-                info!(
-                    "[caption handler] receive sync request from {:?} for {url}",
-                    PrettyChat(&msg.chat)
-                );
-                let msg: Message = ok_or_break!(
-                    bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}")))
-                        .reply_to_message_id(msg.id)
-                        .await
-                );
-
-                let url_clone = url.clone();
-                let cancel_rx = self.register_sync(msg.chat.id.0, &url);
-
-                tokio::spawn(async move {
-                    let result = self.sync_response(&url, cancel_rx).await;
-
-                    self.unregister_sync(msg.chat.id.0, &url_clone);
-
-                    let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
-                });
-                ControlFlow::Break(())
+            if let Some(c) = Synchronizer::match_url_from_url(&url) {
+                final_url = Some(c.to_string());
+                break;
             }
-            None => ControlFlow::Continue(()),
         }
+
+        if let Some(url) = final_url {
+            let msg: Message = ok_or_break!(bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(msg.id).await);
+            let url_clone = url.clone();
+            let cancel_rx = self.register_sync(msg.chat.id.0, &url);
+            tokio::spawn(async move {
+                let result = self.sync_range_response(&url, None, None, cancel_rx).await;
+                self.unregister_sync(msg.chat.id.0, &url_clone);
+                let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
+            });
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
     }
 
-    pub async fn respond_photo(
-        &'static self,
-        bot: DefaultParseMode<Bot>,
-        msg: Message,
-    ) -> ControlFlow<()> {
-        // Add white list check
+    pub async fn respond_photo(&'static self, bot: DefaultParseMode<Bot>, msg: Message) -> ControlFlow<()> {
         if !self.is_allowed(msg.chat.id.0) {
             self.send_unauthorized(&bot, &msg).await;
             return ControlFlow::Break(());
         }
         let first_photo = match msg.photo().and_then(|x| x.first()) {
             Some(p) => p,
-            None => {
-                return ControlFlow::Continue(());
-            }
+            None => return ControlFlow::Continue(()),
         };
 
         let f = ok_or_break!(bot.get_file(&first_photo.file.id).await);
@@ -449,22 +319,12 @@ where
         let search_result: SaucenaoOutput = ok_or_break!(self.searcher.search(buf).await);
 
         let mut url_sim = None;
-        let threshold = if msg.chat.is_private() {
-            MIN_SIMILARITY_PRIVATE
-        } else {
-            MIN_SIMILARITY
-        };
-        for element in search_result
-            .data
-            .into_iter()
-            .filter(|x| x.similarity >= threshold)
-        {
+        let threshold = if msg.chat.is_private() { MIN_SIMILARITY_PRIVATE } else { MIN_SIMILARITY };
+        
+        for element in search_result.data.into_iter().filter(|x| x.similarity >= threshold) {
             match element.parsed {
                 SaucenaoParsed::EHentai(f_hash) => {
-                    url_sim = Some((
-                        ok_or_break!(self.convertor.convert_to_gallery(&f_hash).await),
-                        element.similarity,
-                    ));
+                    url_sim = Some((ok_or_break!(self.convertor.convert_to_gallery(&f_hash).await), element.similarity));
                     break;
                 }
                 SaucenaoParsed::NHentai(nid) => {
@@ -475,105 +335,112 @@ where
             }
         }
 
-        let (url, sim) = match url_sim {
-            Some(u) => u,
-            None => {
-                trace!("[photo handler] image not found");
-                return ControlFlow::Continue(());
+        if let Some((url, _)) = url_sim {
+            if let Ok(msg) = bot.send_message(msg.chat.id, escape(&format!("Syncing url {url}"))).reply_to_message_id(msg.id).await {
+                let url_clone = url.clone();
+                let cancel_rx = self.register_sync(msg.chat.id.0, &url);
+                tokio::spawn(async move {
+                    let result = self.sync_range_response(&url, None, None, cancel_rx).await;
+                    self.unregister_sync(msg.chat.id.0, &url_clone);
+                    let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
+                });
             }
-        };
-
-        info!(
-            "[photo handler] receive sync request from {:?} for {url} with similarity {sim}",
-            PrettyChat(&msg.chat)
-        );
-
-        if let Ok(msg) = bot
-            .send_message(msg.chat.id, escape(&format!("Syncing url {url}")))
-            .reply_to_message_id(msg.id)
-            .await
-        {
-            let url_clone = url.clone();
-            let cancel_rx = self.register_sync(msg.chat.id.0, &url);
-
-            tokio::spawn(async move {
-                let result = self.sync_response(&url, cancel_rx).await;
-
-                self.unregister_sync(msg.chat.id.0, &url_clone);
-
-                let _ = bot.edit_message_text(msg.chat.id, msg.id, result).await;
-            });
+            return ControlFlow::Break(());
         }
-
-        ControlFlow::Break(())
+        ControlFlow::Continue(())
     }
 
-    pub async fn respond_default(
-        &'static self,
-        bot: DefaultParseMode<Bot>,
-        msg: Message,
-    ) -> ControlFlow<()> {
+    pub async fn respond_default(&'static self, bot: DefaultParseMode<Bot>, msg: Message) -> ControlFlow<()> {
         if msg.chat.is_private() {
-            ok_or_break!(
-                bot.send_message(msg.chat.id, escape("Unrecognized message. Maybe /help ?"))
-                    .reply_to_message_id(msg.id)
-                    .await
-            );
+            ok_or_break!(bot.send_message(msg.chat.id, escape("Unrecognized message. Maybe /help ?")).reply_to_message_id(msg.id).await);
         }
-        #[cfg(debug_assertions)]
-        tracing::warn!("{:?}", msg);
         ControlFlow::Break(())
     }
 
-    // Updated sync_response method with cancellation
-    async fn sync_response(&self, url: &str, mut cancel_rx: oneshot::Receiver<()>) -> String {
+    // ==== 核心路由與發送方法 ====
+
+    async fn sync_range_response(&self, url: &str, start: Option<usize>, end: Option<usize>, mut cancel_rx: oneshot::Receiver<()>) -> String {
         tokio::select! {
             result = self.single_flight.work(url, || async {
-                match self.route_sync(url).await {
-                    Ok(sync_url) => {
-                        format!("Sync to telegraph finished: {}", link(&sync_url, &escape(&sync_url)))
-                    }
-                    Err(e) => {
-                        format!("Sync to telegraph failed: {}", escape(&e.to_string()))
-                    }
+                match self.route_sync(url, start, end).await {
+                    Ok(sync_url) => format!("Sync to telegraph finished: {}", link(&sync_url, &escape(&sync_url))),
+                    Err(e) => format!("Sync to telegraph failed: {}", escape(&e.to_string())),
                 }
             }) => result,
-            _ = &mut cancel_rx => {
-                "Sync operation was cancelled.".to_string()
-            }
+            _ = &mut cancel_rx => "Sync operation was cancelled.".to_string()
         }
     }
 
-    async fn route_sync(&self, url: &str) -> anyhow::Result<String> {
+    async fn route_sync(&self, url: &str, start: Option<usize>, end: Option<usize>) -> anyhow::Result<String> {
         let u = Url::parse(url).map_err(|_| anyhow::anyhow!("Invalid url"))?;
         let host = u.host_str().unwrap_or_default();
         let path = u.path().to_string();
 
-        // TODO: use macro to generate them
-        #[allow(clippy::single_match)]
         match host {
-            "e-hentai.org" => {
-                info!("[registry] sync e-hentai for path {}", path);
-                self.synchronizer
-                    .sync::<EHCollector>(path)
-                    .await
-                    .map_err(anyhow::Error::from)
-            }
-            "nhentai.to" | "nhentai.net" => {
-                info!("[registry] sync nhentai for path {}", path);
-                self.synchronizer
-                    .sync::<NHCollector>(path)
-                    .await
-                    .map_err(anyhow::Error::from)
-            }
-            "exhentai.org" => {
-                info!("[registry] sync exhentai for path {}", path);
-                self.synchronizer
-                    .sync::<EXCollector>(path)
-                    .await
-                    .map_err(anyhow::Error::from)
-            }
+            "e-hentai.org" => self.synchronizer.sync::<EHCollector>(path, start, end).await.map_err(Into::into),
+            "nhentai.to" | "nhentai.net" => self.synchronizer.sync::<NHCollector>(path, start, end).await.map_err(Into::into),
+            "exhentai.org" => self.synchronizer.sync::<EXCollector>(path, start, end).await.map_err(Into::into),
             _ => Err(anyhow::anyhow!("no matching collector")),
+        }
+    }
+
+    async fn route_fetch_images(&self, url: &str, start: usize, end: usize) -> anyhow::Result<(AlbumMeta, Vec<(ImageMeta, ImageData)>)> {
+        let u = Url::parse(url).map_err(|_| anyhow::anyhow!("Invalid url"))?;
+        let host = u.host_str().unwrap_or_default();
+        let path = u.path().to_string();
+
+        match host {
+            "e-hentai.org" => self.synchronizer.fetch_images_only::<EHCollector>(path, start, end).await,
+            "exhentai.org" => self.synchronizer.fetch_images_only::<EXCollector>(path, start, end).await,
+            "nhentai.to" | "nhentai.net" => self.synchronizer.fetch_images_only::<NHCollector>(path, start, end).await,
+            _ => Err(anyhow::anyhow!("no matching collector")),
+        }
+    }
+
+    async fn send_media_group_response(
+        &self,
+        bot: &DefaultParseMode<Bot>,
+        chat_id: ChatId,
+        msg_id: MessageId,
+        url: &str,
+        start: usize,
+        end: usize,
+        mut cancel_rx: oneshot::Receiver<()>,
+    ) {
+        let url_clone = url.to_string();
+        let flight_key = format!("{}|{}|{}", url, start, end);
+        
+        tokio::select! {
+            result = self.single_flight.work(&flight_key, || async {
+                self.route_fetch_images(&url_clone, start, end).await
+            }) => {
+                match result {
+                    Ok((meta, images)) if !images.is_empty() => {
+                        let mut media_group = Vec::new();
+                        let display_title = escape(&format!("{} (Pages {}-{})", meta.name, start, end));
+                        let caption = link(&meta.link, &display_title);
+
+                        for (i, (_img_meta, data)) in images.into_iter().enumerate() {
+                            let mut photo = InputMediaPhoto::new(InputFile::memory(data));
+                            if i == 0 {
+                                photo = photo.caption(caption.clone()).parse_mode(ParseMode::MarkdownV2);
+                            }
+                            media_group.push(InputMedia::Photo(photo));
+                        }
+
+                        if let Ok(_) = bot.send_media_group(chat_id, media_group).reply_to_message_id(msg_id).await {
+                            let _ = bot.delete_message(chat_id, msg_id).await;
+                        } else {
+                            let _ = bot.edit_message_text(chat_id, msg_id, escape("Failed to send media group.")).await;
+                        }
+                    },
+                    Ok(_) => { let _ = bot.edit_message_text(chat_id, msg_id, escape("Failed: No images found in this range.")).await; },
+                    Err(e) => { let _ = bot.edit_message_text(chat_id, msg_id, escape(&format!("Fetch failed: {}", e))).await; }
+                }
+            },
+            _ = &mut cancel_rx => {
+                 let _ = bot.edit_message_text(chat_id, msg_id, escape("Operation cancelled by user.")).await;
+            }
         }
     }
 }
