@@ -31,7 +31,7 @@ jobs:
         uses: docker/login-action@v1
         with:
           registry: ghcr.io
-          username: aizawa
+          username: aiza2a
           password: ${{ secrets.GITHU_TOKEN }}
       - name: Generate App Version
         run: echo VERSIONED_TAG=`git describe --tags --always` >> $GITHUB_ENV
