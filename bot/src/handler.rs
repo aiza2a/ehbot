@@ -40,7 +40,7 @@ const MIN_SIMILARITY_PRIVATE: u8 = 50;
     🚀 本機器人支持畫廊全量與片段同步。您可以直接發送鏈接，或使用指令：\n\
     👉 格式：/sync <url> <start> <end>\n\
         💡 示例 1：/sync <url> 3 (單頁直發)\n\
-        💡 示例 2：/sync <url> 3 16 (抓取 3-16 頁，＜5頁時圖片組發送)\n\n\ 
+        💡 示例 2：/sync <url> 3 16 (抓取 3-16 頁，少於5頁時以圖片組發送)\n\n\
     👇 可用指令列表："
 )]
 pub enum Command {
@@ -57,9 +57,9 @@ pub enum Command {
 }
 
 #[derive(BotCommands, Clone)]
-#[command(rename_rule = "lowercase", description = "Command for admins")]
+#[command(rename_rule = "lowercase", description = "管理員命令")]
 pub enum AdminCommand {
-    #[command(description = "Delete cache with given key.")]
+    #[command(description = "刪除快取Key")]
     Delete(String),
 }
 
