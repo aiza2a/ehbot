@@ -1,8 +1,8 @@
 version: "3"
 services:
   ehbot:
-    image: ghcr.io/aiza2a/ehbot:latest
-    container_name: ehbot
+    image: ghcr.io/aiza2a/iehbot:latest
+    container_name: ehbot-inline
     restart: always
     network_mode: "host"
     environment:
