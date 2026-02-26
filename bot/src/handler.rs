@@ -288,12 +288,12 @@ where
             //Command::Help => { let _ = bot.send_message(msg.chat.id, escape(&Command::descriptions().to_string())).reply_to_message_id(msg.id).await; }
             Command::Start | Command::Help =>{ 
                 // 手動編寫並已嚴格轉義的 MarkdownV2 引言
-                let intro = "嗨\\！這裡是 *薄 青*\n\n\
+                let intro = "嗨\！這裡是 *薄 青*\n\n\
                 本機器人采用白名單模式，支持畫廊全量與片段同步。\n\
                 您可以直接發送鏈接，或使用指令：\n\
                 ► 格式：`/sync <url> <start> <end>`\n\
-                    ▻ 示例 1：`/sync <url> 3` \\(單頁直發\\)\n\
-                    ▻ 示例 2：`/sync <url> 3 16` \\(抓取 3\\-16 頁，少於 5 頁時以圖片組發送\\)\n\n\
+                    ▻ 示例 1：`/sync <url> 3` \\ (單頁直發\\)\n\
+                    ▻ 示例 2：`/sync <url> 3 16` \\ (抓取 3\\-16 頁，少於 5 頁時以圖片組發送\\)\n\n\
                 *可用指令列表：*\n";
 
                 // 僅對動態生成的指令列表進行轉義，防止破壞整體 Markdown 格式
