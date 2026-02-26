@@ -1,15 +1,16 @@
 pub(crate) static VERSION: &str = concat!(
     "\n",
-    "Build Timestamp:\t",
+    "构建时间戳：\t",
     env!("VERGEN_BUILD_TIMESTAMP"),
     "\n",
-    "Package Version:\t",
+    "包版本：\t",
     env!("CARGO_PKG_VERSION"),
     "\n",
-    "rustc Version:  \t",
+    "Rustc版本：  \t",
     env!("VERGEN_RUSTC_SEMVER"),
     "\n",
-    "Cargo Target:   \t",
+    "Cargo目标平台：   \t",
     env!("VERGEN_CARGO_TARGET_TRIPLE"),
-    "\n"
+    "\n"，
+    "源碼:    \thttps://github.com/qini7-sese/eh2telegraph"
 );
