@@ -457,9 +457,9 @@ where
                             let title_link = link(&url_clone, &escape(&title_display));
                             let title_bold = format!("*{}*", title_link);
 
-                            let preview_display = "〔 即 時 預 覽 〕".to_string();
+                            let preview_display = " 即 時 預 覽 ".to_string();
                             let preview_link = link(&sync_url, &escape(&preview_display));
-                            let preview_bold = format!("*{}*", preview_link);
+                            let preview_bold = format!("*〔{}〕*", preview_link);
 
                             format!(
                                 "`❀Title :` {}\n\n`❀Preview :` {}\n\n► `{}`",
@@ -467,9 +467,9 @@ where
                             )
                         } else {
                             // 降級顯示 (如果萬一沒抓取到 Meta)
-                            let preview_display = "〔 即 時 預 覽 〕".to_string();
+                            let preview_display = " 即 時 預 覽 ".to_string();
                             let preview_link = link(&sync_url, &escape(&preview_display));
-                            let preview_bold = format!("*{}*", preview_link);
+                            let preview_bold = format!("*〔{}〕*", preview_link);
 
                             format!(
                                 "`❀Preview :` {}\n\n► `{}`",
