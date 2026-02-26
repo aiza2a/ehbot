@@ -219,7 +219,7 @@ where
                     let s = start_page.unwrap();
                     let e = end_page.unwrap();
                     tokio::spawn(async move {
-                        self.send_media_group_response(&bot, msg.chat.id, prompt_msg_id, original_msg_id, &url_clone, s, e, cancel_rx).await;
+                        self.send_media_group_response(&bot, msg.chat.id, prompt_msg_id, &url_clone, s, e, cancel_rx).await;
                         self.unregister_sync(msg.chat.id.0, &url_clone);
                     });
                 } else {
