@@ -35,7 +35,7 @@ const MIN_SIMILARITY_PRIVATE: u8 = 50;
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase")]
 pub enum Command {
-    #[command(description = "顯示帳號ID")]
+    #[command(description = "顯示聊天ID")]
     Id,
     #[command(description = "開始使用機器人")]
     Start,
@@ -52,7 +52,7 @@ pub enum Command {
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "管理員命令")]
 pub enum AdminCommand {
-    #[command(description = "刪除快取Key")]
+    #[command(description = "刪除指定鍵值快取")]
     Delete(String),
 }
 
@@ -251,7 +251,7 @@ where
         };
 
         
-        if diff <= 5 {
+        if diff <= 10 {
             let s = start_page.unwrap();
             let e = end_page.unwrap();
             tokio::spawn(async move {
@@ -289,11 +289,15 @@ where
             Command::Start | Command::Help =>{ 
                 let intro = r#"嗨！這裡是 *薄青✨*
 
-本機器人采用白名單模式，支持畫廊全量與片段同步。
+本機器人采用白名單模式，支持畫廊全量與片段同步
+
 您可以直接發送鏈接，或使用指令：
 ► 格式：`/sync <url> <start> <end>`
-    ▻ 示例 1：`/sync <url> 3` \(單頁直發\)
-    ▻ 示例 2：`/sync <url> 3 16` \(抓取 3\-16 頁，少於 5 頁時以圖片組發送\)
+    ▻ 示例 1：`/sync <url> ` \(同步全部\)
+    ▻ 示例 2：`/sync <url> 5` \(單頁直發\)
+    ▻ 示例 3：`/sync <url> 5 10` \(抓取 5\-10 頁，以圖片組傳送\)
+    ▻ 示例 4：`/sync <url> 5 15` \(相差超過 10 頁，以即時預覽傳送\)
+直接發送圖片可通過 SauceNAO 搜索自動上傳
 
 *可用指令列表：*
 "#;
@@ -329,7 +333,8 @@ where
         if let AdminCommand::Delete(key) = command {
             tokio::spawn(async move {
                 let _ = self.synchronizer.delete_cache(&key).await;
-                let _ = bot.send_message(msg.chat.id, escape(&format!("Key {key} 已刪除"))).reply_to_message_id(msg.id).await;
+                //let _ = bot.send_message(msg.chat.id, escape(&format!("已刪除快取鍵值：` {key} `"))).reply_to_message_id(msg.id).await;
+                let _ = bot.send_message(msg.chat.id, format!("已刪除快取鍵值：`{}`", escape(&key))).reply_to_message_id(msg.id).await;
             });
         }
         ControlFlow::Break(())
@@ -404,14 +409,14 @@ where
         let f = match bot.get_file(&best_photo.file.id).await {
             Ok(file) => file,
             Err(_) => {
-                let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape("無法獲取 Telegram 圖片檔案。")).await;
+                let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape("無法獲取 Telegram 圖片檔案")).await;
                 return ControlFlow::Break(());
             }
         };
 
         let mut buf: Vec<u8> = Vec::with_capacity(f.size as usize);
         if teloxide::net::Download::download_file(&bot, &f.path, &mut buf).await.is_err() {
-            let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape("圖片下載失敗。")).await;
+            let _ = bot.edit_message_text(msg.chat.id, prompt_msg.id, escape("圖片下載失敗...")).await;
             return ControlFlow::Break(());
         }
 
@@ -455,7 +460,7 @@ where
 
     pub async fn respond_default(&'static self, bot: DefaultParseMode<Bot>, msg: Message) -> ControlFlow<()> {
         if msg.chat.is_private() {
-            ok_or_break!(bot.send_message(msg.chat.id, escape("無法識別的消息，請使用 /help 查看幫助。")).reply_to_message_id(msg.id).await);
+            ok_or_break!(bot.send_message(msg.chat.id, escape("無法識別的消息，請使用 /help 查看幫助")).reply_to_message_id(msg.id).await);
         }
         ControlFlow::Break(())
     }
