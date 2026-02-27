@@ -206,27 +206,59 @@ where
         IT: IntoIterator<Item = I>,
         I: Into<Cow<'static, [u8]>>,
     {
+        // 定義用於解析設定檔的結構體
+        #[derive(serde::Deserialize)]
+        struct ImgBBConfig {
+            api_key: String,
+        }
+
         let mut results = Vec::new();
+        
+        // 透過全域配置解析器，安全地讀取 ImgBB 的 API Key
+        let imgbb_config: Option<ImgBBConfig> = crate::config::parse("imgbb").unwrap_or(None);
+        let imgbb_key = match imgbb_config {
+            Some(cfg) => cfg.api_key,
+            None => {
+                tracing::error!("上傳失敗：在 config.yaml 中找不到 imgbb.api_key 配置！");
+                return Err(TelegraphError::Server);
+            }
+        };
 
         for data in files.into_iter() {
-            let form = Form::new()
-                .text("reqtype", "fileupload")
-                .text("userhash", "")
-                .part("fileToUpload", Part::bytes(data).file_name("image.jpg"));
+            let data_cow = data.into();
+            
+            // 智慧擴展名判定：強制將 WebP 偽裝成常規圖片，ImgBB 後端會自動處理
+            let is_gif = data_cow.starts_with(b"GIF8");
+            let is_png = data_cow.starts_with(b"\x89PNG\r\n\x1a\n");
+            let file_name = if is_gif {
+                "image.gif"
+            } else if is_png {
+                "image.png"
+            } else {
+                "image.jpg" 
+            };
 
+            // 構建上傳表單，並注入從設定檔讀取的 Key
+            let form = Form::new()
+                .text("key", imgbb_key.clone())
+                .part("image", Part::bytes(data_cow).file_name(file_name));
+
+            // 發送至 ImgBB API
             let response = self
                 .client
-                .post_builder("https://catbox.moe/user/api.php")
+                .post_builder("https://api.imgbb.com/1/upload")
                 .multipart(form)
                 .send()
                 .await
                 .and_then(Response::error_for_status)?;
 
-            let url = response.text().await?;
+            // 解析 JSON 回傳格式
+            let json_resp: serde_json::Value = response.json().await?;
 
-            if url.starts_with("https://files.catbox.moe/") {
-                results.push(MediaInfo { src: url });
+            if let Some(url) = json_resp.get("data").and_then(|d| d.get("url")).and_then(|u| u.as_str()) {
+                results.push(MediaInfo { src: url.to_string() });
             } else {
+                tracing::error!("ImgBB 上傳失敗: {:?}", json_resp);
                 return Err(TelegraphError::Server);
             }
         }
