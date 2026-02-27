@@ -289,17 +289,18 @@ where
             Command::Start | Command::Help =>{ 
                 let intro = r#"嗨！這裡是 *薄青✨*
 
-本機器人采用白名單模式，支持畫廊全量與片段同步
+*本機器人采用白名單模式，支持畫廊全量與片段同步*
 
 您可以直接發送鏈接，或使用指令：
 ► 格式：`/sync <url> <start> <end>`
-    ▻ 示例 1：`/sync <url> ` \(同步全部\)
-    ▻ 示例 2：`/sync <url> 5` \(單頁直發\)
-    ▻ 示例 3：`/sync <url> 5 10` \(抓取 5\-10 頁，以圖片組傳送\)
-    ▻ 示例 4：`/sync <url> 5 15` \(相差超過 10 頁，以即時預覽傳送\)
-直接發送圖片可通過 SauceNAO 搜索自動上傳
+    ▻ `/sync <url> ` ：同步全部
+    ▻ `/sync <url> 5` ：單頁直發
+    ▻ `/sync <url> 5 10` ：抓取 5\-10 頁 \(圖片組\)
+    ▻ `/sync <url> 5 15` ：超過 10 頁 \(即時預覽\)
+                    
+*直接發送圖片可通過 SauceNAO 搜索自動上傳*
 
-*可用指令列表：*
+*指令列表：*
 "#;
                 let cmds = escape(&Command::descriptions().to_string());
                 let text = format!("{}{}", intro, cmds);
@@ -315,7 +316,8 @@ where
             }
             Command::Sync(input) => {
                 if input.is_empty() {
-                    let _ = bot.send_message(msg.chat.id, escape("使用方法：/sync <url> [start] [end]")).reply_to_message_id(msg.id).await;
+                    //let _ = bot.send_message(msg.chat.id, escape("使用方法：/sync <url> <start> <end>")).reply_to_message_id(msg.id).await;
+                    let _ = bot.send_message(msg.chat.id, "使用方法：`/sync <url> <start> <end>`").reply_to_message_id(msg.id).await;
                     return ControlFlow::Break(());
                 }
 
