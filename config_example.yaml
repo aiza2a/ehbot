@@ -20,6 +20,9 @@ exhentai:
   ipb_member_id: xxx
   igneous: xxx
 
+imgbb:
+  api_key: "IMGBB_API_KEY"
+
 worker_kv:
   endpoint: https://kv.xxx.workers.dev
   token: xxx
