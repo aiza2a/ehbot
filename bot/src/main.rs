@@ -159,7 +159,7 @@ async fn main() {
         dptree::entry()
             .chain(dptree::filter_map(move |update: Update| {
                 match update.kind {
-                    UpdateKind::Message(x) | UpdateKind::EditedMessage(x) => Some(x),
+                    UpdateKind::Message(x) => Some(x),
                     _ => None,
                 }
             }))
