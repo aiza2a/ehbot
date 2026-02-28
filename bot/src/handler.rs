@@ -393,6 +393,10 @@ where
     }
 
     pub async fn respond_photo(&'static self, bot: DefaultParseMode<Bot>, msg: Message) -> ControlFlow<()> {
+        if !msg.chat.is_private() {
+            return ControlFlow::Break(());
+        }
+        
         if !self.is_allowed(msg.chat.id.0) {
             self.send_unauthorized(&bot, &msg).await;
             return ControlFlow::Break(());
